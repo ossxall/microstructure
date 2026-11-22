@@ -11,20 +11,38 @@ struct BinanceAck {
     result: Option<serde_json::Value>,
     id: Option<u64>,
 }
+
 /**
- {
+Binance wsconection logs example:
+
+Connected to wss://fstream.binance.com/ws
+{
+  "method": "SUBSCRIBE",
+  "params": [
+    "btcusdt@trade"
+  ],
+  "id": 1
+}
+{
+  "result": null,
+  "id": 1
+}
+{
   "e": "trade",
-  "E": 1785276941124,
-  "T": 1785276941123,
+  "E": 1795385689969,
+  "T": 1795385689969,
   "s": "BTCUSDT",
-  "t": 7935134524,
-  "p": "63977.10",
+  "t": 8321796699,
+  "p": "60900.70",
   "q": "0.001",
   "X": "MARKET",
-  "m": false,
+  "m": true,
   "st": 1
 }
- */
+
+}
+*/
+
 #[derive(Debug, Deserialize)]
 struct BinanceTrade {
     #[serde(rename = "e")]
