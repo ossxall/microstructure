@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::env;
+use std::{env, path::Path};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -10,6 +10,12 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
+        let env_dev_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env.dev");
+        if env_dev_path.is_file() {
+            dotenvy::from_path(&env_dev_path)
+                .with_context(|| format!("Failed to load {}", env_dev_path.display()))?;
+        }
+
         let source = env::var("SOURCE")
             .context("Missing SOURCE environment variable")?
             .trim()

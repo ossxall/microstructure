@@ -1,8 +1,8 @@
 # Development Pulsar deployment based on:
 # https://pulsar.apache.org/docs/5.0.x/deploy-docker/
 #
-# Start with: docker compose -f .infra.yaml up -d
-# Stop with:  docker compose -f .infra.yaml down
+# Start with: docker compose -f infra.yaml up -d
+# Stop with:  docker compose -f infra.yaml down
 services:
   oxia:
     image: oxia/oxia:latest
