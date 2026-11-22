@@ -31,7 +31,7 @@ use tracing::{error, info};
 /// Connects to the WebSocket source, streams trade ticks, and sends them
 /// through the provided channel until the connection ends.
 async fn run_connection(tx: Sender<Vec<Tick>>, source: &str, symbols: &str) -> Result<()> {
-    let source_url: &str = get_source_endpoint(source);
+    let source_url: &str = get_source_endpoint(source)?;
 
     info!("Connecting to source {source}");
 

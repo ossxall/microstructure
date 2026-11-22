@@ -57,14 +57,8 @@ struct DydxTrade {
 
     price: String,
 
-    #[serde(rename = "type")]
-    order_type: String,
-
     #[serde(rename = "createdAt")]
     created_at: DateTime<Utc>,
-
-    #[serde(rename = "createdAtHeight")]
-    created_at_height: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,18 +68,7 @@ struct DydxContents {
 
 #[derive(Debug, Deserialize)]
 struct DydxWsMessage {
-    #[serde(rename = "type")]
-    msg_type: String,
-
-    connection_id: String,
-
-    message_id: u64,
-
-    channel: String,
-
     id: String,
-
-    version: Option<String>,
 
     contents: DydxContents,
 }

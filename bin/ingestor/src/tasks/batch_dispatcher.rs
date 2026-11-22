@@ -18,7 +18,7 @@ use anyhow::{Result, bail};
 use async_channel::{Receiver, Sender};
 use std::time::Duration;
 use tokio::time::{Interval, MissedTickBehavior, interval};
-use tracing::{info};
+use tracing::info;
 
 const MAX_BATCH_SIZE: usize = 10_000;
 const MAX_BATCH_AGE: Duration = Duration::from_millis(250);
@@ -72,6 +72,4 @@ pub async fn run(tick_rx: Receiver<Vec<Tick>>, batch_tx: Sender<Vec<Tick>>) -> R
             }
         }
     }
-
-    Ok(())
 }

@@ -13,10 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use clickhouse::Row;
 use serde::Serialize;
 
-#[derive(Debug, Clone, Row, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Tick {
     pub source: String,
     pub symbol: String,

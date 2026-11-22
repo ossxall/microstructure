@@ -1,0 +1,81 @@
+# Development Pulsar deployment based on:
+# https://pulsar.apache.org/docs/5.0.x/deploy-docker/
+#
+# Start with: docker compose -f .infra.yaml up -d
+# Stop with:  docker compose -f .infra.yaml down
+services:
+  oxia:
+    image: oxia/oxia:latest
+    command: ["oxia", "standalone"]
+    restart: unless-stopped
+    volumes:
+      - oxia-data:/data
+
+  initialize-pulsar-metadata:
+    user: "0:0"  
+    image: apachepulsar/pulsar:5.0.1
+    depends_on:
+      oxia:
+        condition: service_started
+    volumes:
+      - pulsar-init:/init
+    command:
+      - bash
+      - -lc
+      - |
+        until (echo > /dev/tcp/oxia/6648) >/dev/null 2>&1; do
+          sleep 1
+        done
+        if [ -f /init/initialized ]; then
+          echo "Pulsar cluster metadata already initialized"
+          exit 0
+        fi
+        bin/pulsar initialize-cluster-metadata \
+          --cluster cluster-a \
+          --metadata-store oxia://oxia:6648/default \
+          --configuration-store oxia://oxia:6648/default \
+          --web-service-url http://broker:8080 \
+          --broker-service-url pulsar://broker:6650 \
+        && touch /init/initialized
+
+  bookie:
+    image: apachepulsar/pulsar:5.0.1
+    hostname: bookie
+    depends_on:
+      initialize-pulsar-metadata:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    environment:
+      clusterName: cluster-a
+      metadataServiceUri: metadata-store:oxia://oxia:6648/default
+    volumes:
+      - bookkeeper-data:/pulsar/data/bookkeeper
+    command:
+      - bash
+      - -c
+      - bin/apply-config-from-env.py conf/bookkeeper.conf && exec bin/pulsar bookie
+
+  broker:
+    image: apachepulsar/pulsar:5.0.1
+    hostname: broker
+    depends_on:
+      initialize-pulsar-metadata:
+        condition: service_completed_successfully
+      bookie:
+        condition: service_started
+    restart: unless-stopped
+    environment:
+      metadataStoreUrl: oxia://oxia:6648/default
+      clusterName: cluster-a
+    ports:
+      - "6650:6650"
+      - "8080:8080"
+    command:
+      - bash
+      - -c
+      - bin/apply-config-from-env.py conf/broker.conf && exec bin/pulsar broker
+
+volumes:
+  oxia-data:
+  pulsar-init:
+  bookkeeper-data:

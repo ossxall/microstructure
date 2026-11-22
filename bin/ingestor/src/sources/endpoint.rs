@@ -13,38 +13,31 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::{models::Tick, sources::{binance::parse_binance_trade, dydx::parse_dydx_trade}};
-use anyhow::Result;
+use crate::{
+    models::Tick,
+    sources::{binance::parse_binance_trade, dydx::parse_dydx_trade},
+};
+use anyhow::{Result, bail};
 use futures_util::{SinkExt, stream::SplitSink};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
-    tungstenite::{self, Message},
-};
-use tracing::error;
-use tungstenite::Error;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
 /// Returns the WebSocket endpoint for the given data source.
-/// Kill the process if the source does not exist.
-pub fn get_source_endpoint(source: &str) -> &'static str {
-    match source {
+pub fn get_source_endpoint(source: &str) -> Result<&'static str> {
+    Ok(match source {
         "dydx" => "wss://indexer.dydx.trade/v4/ws",
         "binance" => "wss://fstream.binance.com/ws",
-        _ => {
-            error!("Source not found: {}", source);
-            std::process::exit(1);
-        }
-    }
+        _ => bail!("Unsupported source: {source}"),
+    })
 }
 
 /// Sends the subscription message required to initialize the WebSocket
 /// connection for the specified market data source.
-/// Kill the process if the source does not exist.
 pub async fn prepare_source_endpoint(
     source: &str,
     symbols: &str,
     write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
-) -> Result<(), Error> {
+) -> Result<()> {
     match source {
         "dydx" => {
             for symbol in symbols
@@ -85,24 +78,17 @@ pub async fn prepare_source_endpoint(
             }
         }
 
-        _ => {
-            error!("Unsupported source: {}", source);
-            std::process::exit(1);
-        }
+        _ => bail!("Unsupported source: {source}"),
     }
 
     Ok(())
 }
 
 /// Parses a trade message from the specified source into one or more `Tick` values.
-/// Kill the process if the source does not exist.
 pub fn parse_source_trade(source: &str, text: &str) -> Result<Vec<Tick>> {
     match source {
         "dydx" => parse_dydx_trade(text),
         "binance" => parse_binance_trade(text),
-        _ => {
-            error!("Unsupported source: {}", source);
-            std::process::exit(1);
-        }
+        _ => bail!("Unsupported source: {source}"),
     }
 }

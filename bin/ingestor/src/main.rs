@@ -15,14 +15,17 @@
 
 use anyhow::Result;
 use async_channel;
-use clickhouse::Client;
-use listener::{
+use ingestor::{
+    config::Config,
     models::Tick,
-    tasks::{batch_dispatcher, database_writer, listen_source_ws},
+    sources::endpoint::get_source_endpoint,
+    tasks::{batch_dispatcher, listen_source_ws, pulsar_writer},
 };
+use pulsar::{Producer, Pulsar, TokioExecutor};
 use rustls::crypto::ring;
+use std::collections::HashMap;
 use tokio::task::JoinSet;
-use tracing::error;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,33 +35,36 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let db: Client = Client::default()
-        .with_url("http://localhost:8123")
-        .with_database("app")
-        .with_user("app")
-        .with_password("app123");
+    let config = Config::from_env()?;
+    get_source_endpoint(&config.source)?;
 
-    db.query("SELECT 1").execute().await?;
+    let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(&config.pulsar_url, TokioExecutor)
+        .build()
+        .await?;
+    let producers: HashMap<String, Producer<TokioExecutor>> =
+        pulsar_writer::create_producers(&pulsar, &config.source, &config.symbols).await?;
+
+    info!(
+        "Ingesting source {}, symbols {}, publishing to Pulsar at {}",
+        config.source,
+        config.symbols.join(","),
+        config.pulsar_url
+    );
 
     let (tick_tx, tick_rx) = async_channel::bounded::<Vec<Tick>>(100_000);
-
     let (batch_tx, batch_rx) = async_channel::bounded::<Vec<Tick>>(200);
 
-    let mut tasks: JoinSet<std::prelude::v1::Result<(), anyhow::Error>> = JoinSet::new();
-
-    let source: &str = "binance";
-
-    let symbols: &str = "BTCUSDT";
+    let mut tasks: JoinSet<Result<()>> = JoinSet::new();
 
     tasks.spawn(listen_source_ws::run(
         tick_tx.clone(),
-        source.into(),
-        symbols.into(),
+        config.source,
+        config.symbols.join(","),
     ));
 
     tasks.spawn(batch_dispatcher::run(tick_rx, batch_tx));
 
-    tasks.spawn(database_writer::run(db.clone(), batch_rx));
+    tasks.spawn(pulsar_writer::run(producers, batch_rx));
 
     while let Some(result) = tasks.join_next().await {
         match result {

@@ -2,15 +2,9 @@ use crate::models::Tick;
 use anyhow::Result;
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::warn;
 
 static FACTOR: Decimal = Decimal::from_parts(100_000_000, 0, 0, false, 0);
-
-#[derive(Debug, Deserialize)]
-struct BinanceAck {
-    result: Option<serde_json::Value>,
-    id: Option<u64>,
-}
 
 /**
 Binance wsconection logs example:
@@ -45,12 +39,6 @@ Connected to wss://fstream.binance.com/ws
 
 #[derive(Debug, Deserialize)]
 struct BinanceTrade {
-    #[serde(rename = "e")]
-    event_type: String,
-
-    #[serde(rename = "E")]
-    event_time: u64,
-
     #[serde(rename = "T")]
     trade_time: u64,
 
@@ -65,9 +53,6 @@ struct BinanceTrade {
 
     #[serde(rename = "q")]
     qty: String,
-
-    #[serde(rename = "X")]
-    execution_type: String,
 
     #[serde(rename = "m")]
     is_buyer_maker: bool,
@@ -96,7 +81,7 @@ pub fn parse_binance_trade(text: &str) -> Result<Vec<Tick>> {
     }
 
     let trade: BinanceTrade = serde_json::from_value(value)?;
-    
+
     if trade.price == "0" || trade.qty == "0" {
         warn!("Ignoring invalid trade: {}", text);
         return Ok(Vec::new());

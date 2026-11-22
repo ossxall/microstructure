@@ -1,0 +1,18 @@
+                    WebSocket
+                        │
+                        ▼
+              Source Parser
+                        │
+             async_channel::Sender<Vec<Tick>>
+                        │
+                        ▼
+                 Batch Dispatcher
+                        │
+             async_channel::Sender<Vec<Tick>>
+                        │
+                        ▼
+                 Pulsar Writer
+             ┌──────────┴──────────┐
+             ▼                     ▼
+ ticks-{source}-{symbol}    ticks-{source}-{symbol}
+ 

@@ -1,9 +1,0 @@
-                    WebSocket
-                        │
-                        ▼
-                Reader Task (1)
-                        │
-             async_channel::Sender<Tick>
-                        │
-                        ▼
- 
