@@ -1,5 +1,6 @@
 # Development Pulsar deployment based on:
 # https://pulsar.apache.org/docs/5.0.x/deploy-docker/
+# Advertises localhost so clients running on the host can follow broker discovery.
 #
 # Start with: docker compose -f infra.yaml up -d
 # Stop with:  docker compose -f infra.yaml down
@@ -34,8 +35,8 @@ services:
           --cluster cluster-a \
           --metadata-store oxia://oxia:6648/default \
           --configuration-store oxia://oxia:6648/default \
-          --web-service-url http://broker:8080 \
-          --broker-service-url pulsar://broker:6650 \
+          --web-service-url http://localhost:8080 \
+          --broker-service-url pulsar://localhost:6650 \
         && touch /init/initialized
 
   bookie:
@@ -67,6 +68,7 @@ services:
     environment:
       metadataStoreUrl: oxia://oxia:6648/default
       clusterName: cluster-a
+      advertisedAddress: localhost
     ports:
       - "6650:6650"
       - "8080:8080"
