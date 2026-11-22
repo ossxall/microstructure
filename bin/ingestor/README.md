@@ -29,6 +29,28 @@ already set in the process environment take precedence.
 persistent://public/default/ticks-{source}-{symbol}
 ```
 
+The URI follows Pulsar's `persistent://<tenant>/<namespace>/<topic-name>`
+format. In this project, the tenant is `public`, the namespace is `default`,
+and the topic name is `ticks-{source}-{symbol}`.
+
+For example, with `SOURCE=binance` and `SYMBOLS=BTCUSDT,ADAUSDT`, the ingestor
+publishes to:
+
+```text
+persistent://public/default/ticks-binance-BTCUSDT
+persistent://public/default/ticks-binance-ADAUSDT
+```
+
+With `SOURCE=dydx` and the symbol `BTC-USD`, the topic URI is:
+
+```text
+persistent://public/default/ticks-dydx-BTC-USD
+```
+
+The topic URI identifies where messages are published. It is not the broker
+connection address, which is configured separately with `PULSAR_URL` (for
+example, `pulsar://localhost:6650`).
+
 Messages use MessagePack and contain a batch with the `Tick` fields in this
 order: `source`, `symbol`, `id`, `time`, `price`, `qty`, `is_buyer_maker`.
 Price and quantity are integer values scaled by `10^8`.
