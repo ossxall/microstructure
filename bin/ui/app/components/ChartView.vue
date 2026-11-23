@@ -481,11 +481,11 @@ onBeforeUnmount(() => {
       <span>{{ minuteBarCount }} / {{ HISTORY_LIMIT }} barras 1m</span>
     </div>
 
-    <div class="relative min-h-[420px] flex-1 overflow-hidden rounded-xl border border-default bg-elevated/30 sm:min-h-[520px]">
+    <div class="chart-view__surface relative overflow-hidden rounded-xl border border-default bg-elevated/30 sm:min-h-[520px]">
       <div
         id="ohlcv-chart"
         ref="chartHost"
-        class="h-full w-full"
+        class="chart-area h-full w-full"
         aria-label="Gráfico de velas OHLCV"
       />
       <div
