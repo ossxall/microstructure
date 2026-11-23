@@ -45,7 +45,7 @@ pnpm dev
 
 ## WebAssembly
 
-El módulo Rust está en `wasm/` y exporta `add(i32, i32) -> i32`. Para compilarlo
+El módulo Rust está en `wasm/` y exporta `add` y `resample_ohlcv`. Para compilarlo
 manualmente desde `bin/ui`:
 
 ```bash
@@ -64,6 +64,14 @@ import { loadBasicWasm } from '~/utils/basicWasm'
 const wasm = await loadBasicWasm()
 const result = wasm.add(2, 3) // 5
 ```
+
+La vista de chart obtiene las últimas 500 barras 1m de `POST
+/api/market/get-history`, se suscribe al WebSocket `/api/market/ws` y remuestrea
+localmente al cambiar de timeframe. El proxy HTTP usa
+`NUXT_MARKET_SERVER_URL` (por defecto `http://localhost:3001/api/market`) y la
+URL pública del WebSocket se puede cambiar con
+`NUXT_PUBLIC_MARKET_WEBSOCKET_URL` (por defecto
+`ws://localhost:3001/api/market/ws`).
 
 ## Production
 

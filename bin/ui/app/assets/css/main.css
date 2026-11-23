@@ -16,3 +16,104 @@
   --color-green-900: #0A5331;
   --color-green-950: #052E16;
 }
+
+#ohlcv-chart {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: #0b0f14;
+}
+
+#ohlcv-chart .pane {
+  position: relative;
+  min-height: 0;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+#ohlcv-chart #pane-main {
+  flex: 1 1 0;
+}
+
+#ohlcv-chart canvas.chart-canvas,
+#ohlcv-chart canvas.drawings-canvas,
+#ohlcv-chart canvas.pricescale-canvas,
+#ohlcv-chart canvas.overlay-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+}
+
+#ohlcv-chart canvas.drawings-canvas,
+#ohlcv-chart canvas.overlay-canvas {
+  pointer-events: none;
+}
+
+#ohlcv-chart canvas.pricescale-canvas {
+  right: 0;
+  left: auto;
+}
+
+#ohlcv-chart #time-axis {
+  position: relative;
+  height: 24px;
+  flex-shrink: 0;
+  border-top: 1px solid rgba(120, 123, 134, 0.25);
+  background: #0b0f14;
+}
+
+#ohlcv-chart #time-axis canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+#ohlcv-chart #scrollbar {
+  position: relative;
+  height: 1px;
+  flex-shrink: 0;
+}
+
+#ohlcv-chart #scrollthumb {
+  position: absolute;
+  height: 1px;
+}
+
+#ohlcv-chart #chart-legend {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 12px;
+  color: #d1d4dc;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+#ohlcv-chart #chart-indicators {
+  position: absolute;
+  z-index: 2;
+  top: 32px;
+  left: 12px;
+  display: flex;
+  color: #d1d4dc;
+  font-size: 11px;
+  pointer-events: none;
+}
+
+#ohlcv-chart .chart-indicators-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+#ohlcv-chart .chart-indicators-item-settings,
+#ohlcv-chart .chart-indicators-item-delete,
+#ohlcv-chart .chart-overlay-ui {
+  display: none;
+}

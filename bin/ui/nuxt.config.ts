@@ -10,7 +10,7 @@ export default defineNuxtConfig({
     enabled: true
   },
 
-  css: ['~/assets/css/main.css'],
+  css: ['~/assets/css/main.css', "~/packages/open-charts/playground/chart.css"],
 
   ui: {
     eslint: {
@@ -19,6 +19,13 @@ export default defineNuxtConfig({
         'no-conflicting-classes': 'error',
         'no-palette-colors': 'error'
       }
+    }
+  },
+
+  runtimeConfig: {
+    marketServerUrl: 'http://localhost:3001/api/market',
+    public: {
+      marketWebSocketUrl: 'ws://localhost:3001/api/market/ws'
     }
   },
 
