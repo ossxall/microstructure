@@ -43,6 +43,28 @@ Start the development server on `http://localhost:3000`:
 pnpm dev
 ```
 
+## WebAssembly
+
+El módulo Rust está en `wasm/` y exporta `add(i32, i32) -> i32`. Para compilarlo
+manualmente desde `bin/ui`:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo build --manifest-path wasm/Cargo.toml --target wasm32-unknown-unknown --release
+mkdir -p public/wasm
+cp wasm/target/wasm32-unknown-unknown/release/ui_wasm.wasm public/wasm/basic.wasm
+```
+
+Nuxt sirve ese archivo en `/wasm/basic.wasm`. Desde código de `app/`, se puede
+cargar y llamar así:
+
+```ts
+import { loadBasicWasm } from '~/utils/basicWasm'
+
+const wasm = await loadBasicWasm()
+const result = wasm.add(2, 3) // 5
+```
+
 ## Production
 
 Build the application for production:
