@@ -8,8 +8,9 @@ Tick example
 Toda información del Tick debe usarse en los calculos.
 Ninguna información del Tick debe perderse al realizar los calculos. Por ningun motivo sin excepción.
 
+Cada Bar de 1m debe ser barra autocontenida, 1 bar con tiene toda la información. Persistir en QuestDB.
 
-MicroBar1m (debe ser barra autocontenida, 1 bar con tiene toda la información)
+MicroBar1m 
 │
 ├── header
 │   ├── schema_version             uint16
