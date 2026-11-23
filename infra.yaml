@@ -19,7 +19,9 @@ services:
     restart: unless-stopped
     environment:
       QDB_CAIRO_COMMIT_MODE: adaptive
+      # QWP write-frame ceiling is about 16 MiB; event payloads are several MiB.
       QDB_HTTP_RECV_BUFFER_SIZE: 16M
+      # SQL/QWP egress must return a complete large outbox row.
       QDB_HTTP_SEND_BUFFER_SIZE: 64M
     ports:
       - "9000:9000"
@@ -71,6 +73,8 @@ services:
     environment:
       clusterName: cluster-a
       metadataServiceUri: metadata-store:oxia://oxia:6648/default
+      # 64 MiB Pulsar messages plus protocol framing overhead.
+      nettyMaxFrameSizeBytes: 67119104
     volumes:
       - bookkeeper-data:/pulsar/data/bookkeeper
     command:
@@ -93,7 +97,8 @@ services:
       advertisedAddress: localhost
       managedLedgerDefaultEnsembleSize: 1
       managedLedgerDefaultWriteQuorum: 1
-      managedLedgerDefaultAckQuorum: 1      
+      managedLedgerDefaultAckQuorum: 1
+      maxMessageSize: 67108864
     ports:
       - "6650:6650"
       - "8080:8080"

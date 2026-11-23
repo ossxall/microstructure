@@ -1,0 +1,1 @@
+docker compose -f infra.yaml down --volumes --rmi all --remove-orphans && docker compose -f infra.yaml up -d --build --pull always

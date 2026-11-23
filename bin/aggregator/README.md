@@ -31,14 +31,14 @@ creates `bars_1m`, `bar_events` (the event outbox), and `aggregator_state`.
   event is sent, using separate durable QWP flushes. Each individual row must
   still fit in one QWP frame. The aggregator configures both `max_buf_size` and
   `sf_max_segment_bytes` to 32 MiB by default. The development QuestDB service
-  in `infra.yaml` sets `http.recv.buffer.size` to 16 MiB for QWP writes and
-  `http.send.buffer.size` to 64 MiB for QWP query results. The latter must be
-  larger than the largest outbox payload: QuestDB's 2 MiB default cannot return
-  a single larger event row. Configure a sufficiently large send buffer in
-  external deployments too. Compose applies these values when the container
-  starts, so recreate QuestDB after changing them. If a row exceeds the
-  effective frame or send-buffer limit, processing/publishing fails and retries
-  on the next poll. If the process stops between the two writes,
+  in `infra.yaml` sets `http.recv.buffer.size` to 16 MiB for QWP writes (the
+  effective single-frame cap) and `http.send.buffer.size` to 64 MiB for query
+  results. The send buffer must exceed the largest outbox payload; QuestDB's
+  2 MiB default cannot return a single larger event row. Configure adequate
+  limits in external deployments too. Compose applies these values when the
+  containers start, so recreate QuestDB after changing them. If a row exceeds
+  the effective frame or send-buffer limit, processing/publishing fails and
+  retries on the next poll. If the process stops between the two writes,
   rescanning the bucket repairs the missing outbox row. Event delivery is **at
   least once**; consumers should deduplicate using `event_id`, which is stable
   for a bar revision.
@@ -88,9 +88,10 @@ gap checks; non-numeric IDs are preserved verbatim in both the identity section
 and `raw_ticks`.
 
 Serialized Pulsar payload sizes depend on the number of raw ticks retained in a
-bar. Set the aggregator log filter to `debug` to record each encoded event's
-byte size, and compare high-activity bars with the deployed broker's configured
-message limit; this repository does not assume a fixed broker limit.
+bar. The development broker in `infra.yaml` allows messages up to 64 MiB via
+`maxMessageSize`, and BookKeeper accepts the corresponding frame size. External
+deployments must raise both limits above the largest encoded bar event. Set the
+aggregator log filter to `debug` to record each encoded event's byte size.
 
 Because the source table has no receive timestamp, `REPROCESS_MINUTES` is the
 late-tick correction horizon, not a proof that arbitrarily late arrivals have
