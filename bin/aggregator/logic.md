@@ -5,8 +5,8 @@ Tick example
 "2026-11-23T00:05:30.161000Z","binance","BTCUSDT","8322178461",6117290000000,100000,0
 "2026-11-23T00:05:30.161000Z","binance","BTCUSDT","8322178462",6117290000000,5200000,0
 
-
-
+Toda información del Tick debe usarse en los calculos.
+Ninguna información del Tick debe perderse al realizar los calculos. Por ningun motivo sin excepción.
 
 
 MicroBar1m (debe ser barra autocontenida, 1 bar con tiene toda la información)
