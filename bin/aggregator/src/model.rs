@@ -18,11 +18,34 @@ use num_bigint::{BigInt, BigUint};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u16 = 2;
+pub const SCHEMA_VERSION: u16 = 3;
 pub const HISTOGRAM_BUCKETS: usize = 16;
 pub const PRICE_SCALE: u8 = 8;
 pub const QUANTITY_SCALE: u8 = 8;
 pub const TIME_UNIT_MILLISECONDS: u8 = 1;
+
+pub(crate) mod decimal_string {
+    use serde::{Serialize, Serializer};
+    use std::fmt::Display;
+
+    pub(crate) fn serialize<T: Display, S: Serializer>(
+        value: &T,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub(crate) fn serialize_vec<T: Display, S: Serializer>(
+        values: &Vec<T>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        values
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+}
 
 pub const COVERAGE_RECEIVE_TIME_UNAVAILABLE: u32 = 1 << 0;
 pub const COVERAGE_NON_NUMERIC_TRADE_ID: u32 = 1 << 1;
@@ -59,9 +82,11 @@ impl Tick {
 #[derive(Debug, Clone, Serialize)]
 pub struct Bar1m {
     pub schema_version: u16,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub timestamp: u64,
     pub source: String,
     pub symbol: String,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub revision: u64,
     pub bar_key: String,
     pub header: Header,
@@ -69,7 +94,7 @@ pub struct Bar1m {
     pub price: Price,
     pub volume_flow: VolumeFlow,
     pub footprint: Footprint,
-    pub returns: Returns,
+    pub price_changes: PriceChanges,
     pub trade_size_statistics: TradeSizeStatistics,
     pub timing: Timing,
     pub distributions: Distributions,
@@ -83,6 +108,7 @@ pub struct Bar1m {
 #[derive(Debug, Clone, Serialize)]
 pub struct Header {
     pub schema_version: u16,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub timestamp: u64,
     pub symbol_id: u16,
     pub source_id: u8,
@@ -95,15 +121,22 @@ pub struct Header {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Identity {
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub first_trade_id: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub last_trade_id: u64,
     pub first_trade_id_raw: String,
     pub last_trade_id_raw: String,
     pub trade_ids_numeric: u8,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub n_trades: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub first_event_ts: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub last_event_ts: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub first_receive_ts: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub last_receive_ts: u64,
     pub coverage_flags: u32,
     pub sequence_contiguous: u8,
@@ -111,46 +144,78 @@ pub struct Identity {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Price {
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub open: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub high: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub low: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub close: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub upticks: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub downticks: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub zero_ticks: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub direction_changes: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub first_price_change: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub last_price_change: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub max_price_change: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub min_price_change: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VolumeFlow {
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub total_qty: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub total_notional: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub buy_qty: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub sell_qty: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub buy_notional: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub sell_notional: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub signed_qty: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub signed_notional: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub buy_count: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub sell_count: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub max_trade_qty: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub max_trade_notional: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub vwap: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Footprint {
     pub level_count: u32,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub poc_price: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub poc_volume: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub poc_delta: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub value_area_high: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub value_area_low: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub max_positive_delta: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub max_negative_delta: i128,
     pub imbalance_count: u32,
     pub stacked_buy_imbalance: u32,
@@ -162,55 +227,81 @@ pub struct Footprint {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FootprintLevel {
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub price: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub buy_qty: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub sell_qty: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub buy_notional: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub sell_notional: u128,
     pub buy_count: u32,
     pub sell_count: u32,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub delta: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub total_qty: u128,
     pub total_count: u32,
     pub flags: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Returns {
-    pub return_count: u64,
-    pub return_first: i64,
-    pub return_last: i64,
-    pub return_sum: i128,
-    pub return_sum_sq: String,
-    pub return_sum_cu: String,
-    pub return_sum_qu: String,
+pub struct PriceChanges {
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub change_count: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub first_change: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub last_change: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub change_sum: i128,
+    pub change_sum_sq: String,
+    pub change_sum_cu: String,
+    pub change_sum_qu: String,
     pub realized_variance: String,
     pub bipower_variation: String,
-    pub positive_variation: u128,
-    pub negative_variation: u128,
-    pub max_return: i64,
-    pub min_return: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub positive_change_magnitude: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub negative_change_magnitude: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub max_change: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub min_change: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TradeSizeStatistics {
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub size_sum: u128,
     pub size_sum_sq: String,
     pub size_sum_cu: String,
     pub size_sum_qu: String,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub max_size: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub min_size: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub mean_size: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Timing {
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub first_interarrival: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub last_interarrival: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub min_interarrival: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub max_interarrival: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub sum_interarrival: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub sum_interarrival_sq: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub interarrival_count: u64,
     pub active_seconds: u8,
     pub activity_profile: Vec<u32>,
@@ -218,56 +309,93 @@ pub struct Timing {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Distributions {
+    #[serde(serialize_with = "decimal_string::serialize_vec")]
     pub trade_size_hist: Vec<u64>,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub trade_size_hist_min: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub trade_size_hist_max: i128,
-    pub return_hist: Vec<u64>,
-    pub return_hist_min: i128,
-    pub return_hist_max: i128,
+    #[serde(serialize_with = "decimal_string::serialize_vec")]
+    pub price_change_hist: Vec<u64>,
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub price_change_hist_min: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub price_change_hist_max: i128,
+    #[serde(serialize_with = "decimal_string::serialize_vec")]
     pub interarrival_hist: Vec<u64>,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub interarrival_hist_min: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub interarrival_hist_max: i128,
+    #[serde(serialize_with = "decimal_string::serialize_vec")]
     pub price_volume_hist: Vec<u64>,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub price_volume_hist_min: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub price_volume_hist_max: i128,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Microstructure {
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub trade_imbalance: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub volume_imbalance: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub notional_imbalance: i128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub buy_trade_ratio: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub sell_trade_ratio: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub trade_intensity: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub average_trade_size: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub price_efficiency: i64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub absorption_buy: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub absorption_sell: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub exhaustion_buy: u128,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub exhaustion_sell: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Integrity {
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub sequence_gaps: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub duplicate_count: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub out_of_order_count: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub invalid_trade_count: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub dropped_trade_count: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub expected_trade_count: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub received_trade_count: u64,
     pub quality_flags: u32,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub checksum: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RawTick {
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub time: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
+    pub time_us: i64,
     pub source: String,
     pub symbol: String,
     pub id: String,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub price: u64,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub qty: u64,
     pub is_buyer_maker: u8,
 }
@@ -427,6 +555,7 @@ pub fn build_bar(
         append_checksum(&mut checksum, tick);
         raw_ticks.push(RawTick {
             time: tick.time_ms()?,
+            time_us: tick.time_us,
             source: tick.source.clone(),
             symbol: tick.symbol.clone(),
             id: tick.id.clone(),
@@ -490,12 +619,12 @@ pub fn build_bar(
         }
     }
 
-    let mut return_sum = 0_i128;
-    let mut return_sum_sq = BigUint::default();
-    let mut return_sum_cu = BigInt::default();
-    let mut return_sum_qu = BigUint::default();
-    let mut positive_variation = 0_u128;
-    let mut negative_variation = 0_u128;
+    let mut change_sum = 0_i128;
+    let mut change_sum_sq = BigUint::default();
+    let mut change_sum_cu = BigInt::default();
+    let mut change_sum_qu = BigUint::default();
+    let mut positive_change_magnitude = 0_u128;
+    let mut negative_change_magnitude = 0_u128;
     let mut bipower_variation = BigUint::default();
     for (index, change) in price_changes.iter().enumerate() {
         let delta = i128::from(*change);
@@ -505,20 +634,20 @@ pub fn build_bar(
         let cube_value = BigInt::from(delta);
         let cube = &cube_value * &cube_value * &cube_value;
         let fourth = &square * &square;
-        return_sum = return_sum
+        change_sum = change_sum
             .checked_add(delta)
             .context("sum of price changes overflows i128")?;
-        return_sum_sq += &square;
-        return_sum_cu += cube;
-        return_sum_qu += fourth;
+        change_sum_sq += &square;
+        change_sum_cu += cube;
+        change_sum_qu += fourth;
         if delta > 0 {
-            positive_variation = positive_variation
+            positive_change_magnitude = positive_change_magnitude
                 .checked_add(abs_delta)
-                .context("positive variation overflows u128")?;
+                .context("positive change magnitude overflows u128")?;
         } else if delta < 0 {
-            negative_variation = negative_variation
+            negative_change_magnitude = negative_change_magnitude
                 .checked_add(abs_delta)
-                .context("negative variation overflows u128")?;
+                .context("negative change magnitude overflows u128")?;
         }
         if index > 0 {
             let previous_abs = i128::from(price_changes[index - 1]).unsigned_abs();
@@ -601,13 +730,13 @@ pub fn build_bar(
     let footprint = build_footprint(&footprint_levels, total_qty)?;
 
     let active_seconds = u8::try_from(activity_profile.iter().filter(|n| **n > 0).count())?;
-    let abs_returns: Vec<i128> = price_changes.iter().map(|v| i128::from(*v)).collect();
+    let change_values: Vec<i128> = price_changes.iter().map(|v| i128::from(*v)).collect();
     let interarrival_values: Vec<i128> = interarrivals.iter().map(|v| i128::from(*v)).collect();
     let price_values: Vec<i128> = prices.iter().map(|v| i128::from(*v)).collect();
     let (trade_size_hist, trade_size_hist_min, trade_size_hist_max) =
         histogram(&sizes, HISTOGRAM_BUCKETS)?;
-    let (return_hist, return_hist_min, return_hist_max) =
-        histogram(&abs_returns, HISTOGRAM_BUCKETS)?;
+    let (price_change_hist, price_change_hist_min, price_change_hist_max) =
+        histogram(&change_values, HISTOGRAM_BUCKETS)?;
     let (interarrival_hist, interarrival_hist_min, interarrival_hist_max) =
         histogram(&interarrival_values, HISTOGRAM_BUCKETS)?;
     let (price_volume_hist, price_volume_hist_min, price_volume_hist_max) =
@@ -652,8 +781,6 @@ pub fn build_bar(
     let last_change = price_changes.last().copied().unwrap_or(0);
     let min_change = price_changes.iter().copied().min().unwrap_or(0);
     let max_change = price_changes.iter().copied().max().unwrap_or(0);
-    let min_return = min_change;
-    let max_return = max_change;
     let first_interarrival = interarrivals.first().copied().unwrap_or(0);
     let last_interarrival = interarrivals.last().copied().unwrap_or(0);
     let min_interarrival = interarrivals.iter().copied().min().unwrap_or(0);
@@ -723,20 +850,20 @@ pub fn build_bar(
             vwap: total_notional.checked_div(total_qty).unwrap_or(0),
         },
         footprint,
-        returns: Returns {
-            return_count: u64::try_from(price_changes.len())?,
-            return_first: first_change,
-            return_last: last_change,
-            return_sum,
-            return_sum_sq: return_sum_sq.to_str_radix(10),
-            return_sum_cu: return_sum_cu.to_str_radix(10),
-            return_sum_qu: return_sum_qu.to_str_radix(10),
-            realized_variance: return_sum_sq.to_str_radix(10),
+        price_changes: PriceChanges {
+            change_count: u64::try_from(price_changes.len())?,
+            first_change,
+            last_change,
+            change_sum,
+            change_sum_sq: change_sum_sq.to_str_radix(10),
+            change_sum_cu: change_sum_cu.to_str_radix(10),
+            change_sum_qu: change_sum_qu.to_str_radix(10),
+            realized_variance: change_sum_sq.to_str_radix(10),
             bipower_variation: bipower_variation.to_str_radix(10),
-            positive_variation,
-            negative_variation,
-            max_return,
-            min_return,
+            positive_change_magnitude,
+            negative_change_magnitude,
+            max_change,
+            min_change,
         },
         trade_size_statistics: TradeSizeStatistics {
             size_sum,
@@ -762,9 +889,9 @@ pub fn build_bar(
             trade_size_hist,
             trade_size_hist_min,
             trade_size_hist_max,
-            return_hist,
-            return_hist_min,
-            return_hist_max,
+            price_change_hist,
+            price_change_hist_min,
+            price_change_hist_max,
             interarrival_hist,
             interarrival_hist_min,
             interarrival_hist_max,
@@ -984,8 +1111,12 @@ fn ratio_fixed(numerator: u64, denominator: u64) -> Result<u64> {
 
 fn compare_trade_ids(left: &str, right: &str) -> std::cmp::Ordering {
     match (left.parse::<u64>(), right.parse::<u64>()) {
-        (Ok(left), Ok(right)) => left.cmp(&right),
-        _ => left.cmp(right),
+        (Ok(left_value), Ok(right_value)) => {
+            left_value.cmp(&right_value).then_with(|| left.cmp(right))
+        }
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Err(_)) => left.cmp(right),
     }
 }
 
@@ -1023,7 +1154,7 @@ fn fnv64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tick, build_bar};
+    use super::{Tick, build_bar, compare_trade_ids};
 
     fn tick(time_ms: u64, id: &str, price: u64, qty: u64, is_buyer_maker: u8) -> Tick {
         Tick {
@@ -1087,6 +1218,29 @@ mod tests {
     }
 
     #[test]
+    fn uses_a_transitive_total_order_for_mixed_ids() {
+        let bar = build_bar(
+            &[
+                tick(1_000, "1a", 12, 1, 0),
+                tick(1_000, "10", 11, 1, 0),
+                tick(1_000, "9", 10, 1, 0),
+                tick(1_000, "02", 9, 1, 0),
+                tick(1_000, "2", 8, 1, 0),
+            ],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+
+        let ids: Vec<&str> = bar.raw_ticks.iter().map(|tick| tick.id.as_str()).collect();
+        assert_eq!(ids, ["02", "2", "9", "10", "1a"]);
+        assert_eq!(compare_trade_ids("9", "10"), std::cmp::Ordering::Less);
+        assert_eq!(compare_trade_ids("10", "1a"), std::cmp::Ordering::Less);
+        assert_eq!(compare_trade_ids("1a", "9"), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
     fn preserves_fourth_moments_beyond_u128_range() {
         let bar = build_bar(
             &[
@@ -1099,10 +1253,89 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(bar.schema_version, 2);
-        assert_eq!(bar.returns.return_sum_qu.len(), 39);
-        assert!(bar.returns.return_sum_qu.starts_with("625"));
+        assert_eq!(bar.schema_version, 3);
+        assert_eq!(bar.price_changes.change_sum_qu.len(), 39);
+        assert!(bar.price_changes.change_sum_qu.starts_with("625"));
         assert_eq!(bar.trade_size_statistics.size_sum_qu.len(), 39);
         assert!(bar.trade_size_statistics.size_sum_qu.starts_with("625"));
+    }
+
+    #[test]
+    fn serializes_wide_integers_as_decimal_strings_and_checksum_is_recomputable() {
+        let bar = build_bar(
+            &[
+                tick(1_000, "1", 5_000_000_000, 5_000_000_000, 0),
+                tick(2_000, "2", 5_000_000_001, 1, 1),
+            ],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        let json = serde_json::to_value(&bar).unwrap();
+
+        assert_eq!(json["timestamp"].as_str(), Some("0"));
+        assert_eq!(json["price"]["open"].as_str(), Some("5000000000"));
+        assert!(json["volume_flow"]["total_notional"].is_string());
+        assert!(json["integrity"]["checksum"].is_string());
+        assert!(json["raw_ticks"][0]["time_us"].is_string());
+        assert!(json["distributions"]["trade_size_hist"][0].is_string());
+        let event = crate::persistence::BarEvent {
+            event_id: "binance/BTCUSDT/0:r1",
+            event_type: "bar.1m",
+            timestamp: bar.timestamp,
+            source: &bar.source,
+            symbol: &bar.symbol,
+            revision: bar.revision,
+            data: &bar,
+        };
+        let event_json = serde_json::to_value(event).unwrap();
+        assert_eq!(event_json["timestamp"].as_str(), Some("0"));
+        assert_eq!(event_json["revision"].as_str(), Some("1"));
+
+        let mut checksum = 0xcbf29ce484222325_u64;
+        let mut append = |bytes: &[u8]| {
+            for byte in bytes {
+                checksum ^= u64::from(*byte);
+                checksum = checksum.wrapping_mul(0x100000001b3);
+            }
+        };
+        for raw_tick in json["raw_ticks"].as_array().unwrap() {
+            for field in ["source", "symbol", "id"] {
+                let value = raw_tick[field].as_str().unwrap();
+                append(&(u64::try_from(value.len()).unwrap()).to_be_bytes());
+                append(value.as_bytes());
+            }
+            append(
+                &raw_tick["time_us"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<i64>()
+                    .unwrap()
+                    .to_be_bytes(),
+            );
+            append(
+                &raw_tick["price"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+                    .to_be_bytes(),
+            );
+            append(
+                &raw_tick["qty"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+                    .to_be_bytes(),
+            );
+            append(&[u8::try_from(raw_tick["is_buyer_maker"].as_u64().unwrap()).unwrap()]);
+        }
+        let expected_checksum = checksum.to_string();
+        assert_eq!(
+            json["integrity"]["checksum"].as_str(),
+            Some(expected_checksum.as_str())
+        );
     }
 }

@@ -1,8 +1,12 @@
 # Current `Bar1m` Structure
 
-This document describes the structure currently serialized by `Bar1m` in
-`src/model.rs` (schema version 2). Bars are stored as JSON in QuestDB and
-included in events published to Pulsar.
+This document describes the `Bar1m` JSON contract serialized by `src/model.rs`
+(schema version 3). Bars are stored as JSON in QuestDB and included as `data`
+in events published to Pulsar.
+
+Version 3 is intentionally not wire-compatible with version 2: wide integers
+are decimal strings, the `returns` object/fields are renamed to `price_changes`,
+and `raw_ticks[].time_us` is added.
 
 ## Input Tick
 
@@ -14,16 +18,20 @@ The `ticks` table provides these fields:
 "2026-11-23T00:05:30.161000Z","binance","BTCUSDT","8322178461",6117290000000,100000,0
 ```
 
-Ticks are sorted by time and, when timestamps match, by numeric ID if both IDs
-are numeric; otherwise, IDs are compared as text. Each bar corresponds to a UTC
-minute using the half-open interval `[start, end)`. A bar is created only when
-the interval contains at least one tick.
+Ticks are sorted by `time_us`, then by a total trade-ID order: IDs that parse as
+`u64` come before text IDs; numeric IDs sort by numeric value, then by their
+original text (so `"02"` precedes `"2"`); text IDs sort lexicographically.
+Each bar corresponds to a UTC minute using the half-open interval
+`[start, end)`. A bar is created only when the interval contains at least one
+tick.
 
 ## JSON Schema
 
-The listed types are the Rust types used by the model. `String` is serialized
-as a JSON string and vectors as arrays. High-order moments listed as `String`
-are emitted as exact decimal strings.
+The listed types are Rust types. In JSON, every `i64`, `u64`, `i128`, and
+`u128` is an exact base-10 string, including elements of arrays of `u64`.
+`u8`, `u16`, and `u32` remain JSON numbers. Rust `String` values are JSON
+strings; vectors are arrays. This is schema version 3 and intentionally avoids
+precision loss in JavaScript and other binary64-based consumers.
 
 ```text
 Bar1m
@@ -109,20 +117,20 @@ Bar1m
 │       ├── total_qty            u128
 │       ├── total_count          u32
 │       └── flags                u16
-├── returns
-│   ├── return_count             u64
-│   ├── return_first             i64
-│   ├── return_last              i64
-│   ├── return_sum               i128
-│   ├── return_sum_sq            String
-│   ├── return_sum_cu            String
-│   ├── return_sum_qu            String
+├── price_changes
+│   ├── change_count             u64
+│   ├── first_change             i64
+│   ├── last_change              i64
+│   ├── change_sum               i128
+│   ├── change_sum_sq            String
+│   ├── change_sum_cu            String
+│   ├── change_sum_qu            String
 │   ├── realized_variance        String
 │   ├── bipower_variation        String
-│   ├── positive_variation       u128
-│   ├── negative_variation       u128
-│   ├── max_return               i64
-│   └── min_return               i64
+│   ├── positive_change_magnitude u128
+│   ├── negative_change_magnitude u128
+│   ├── max_change               i64
+│   └── min_change               i64
 ├── trade_size_statistics
 │   ├── size_sum                 u128
 │   ├── size_sum_sq              String
@@ -145,9 +153,9 @@ Bar1m
 │   ├── trade_size_hist          u64[16]
 │   ├── trade_size_hist_min      i128
 │   ├── trade_size_hist_max      i128
-│   ├── return_hist              u64[16]
-│   ├── return_hist_min          i128
-│   ├── return_hist_max          i128
+│   ├── price_change_hist        u64[16]
+│   ├── price_change_hist_min    i128
+│   ├── price_change_hist_max    i128
 │   ├── interarrival_hist        u64[16]
 │   ├── interarrival_hist_min    i128
 │   ├── interarrival_hist_max    i128
@@ -179,6 +187,7 @@ Bar1m
 │   └── checksum                 u64
 └── raw_ticks[]                  RawTick
     ├── time                     u64
+    ├── time_us                  i64
     ├── source                   String
     ├── symbol                   String
     ├── id                       String
@@ -187,31 +196,94 @@ Bar1m
     └── is_buyer_maker           u8
 ```
 
-## Conventions and Coverage
+## JSON envelope, identity, and versioning
 
-- `timestamp`, `header.timestamp`, `first_event_ts`, `last_event_ts`, and
-  `raw_ticks[].time` are Unix UTC milliseconds. Inter-tick times
-  (`interarrival`) are in microseconds.
-- `price` and `qty` retain the input integers scaled by `10^8`; `notional` is
-  their integer product.
-- Price changes and their moments/histograms are integer price changes, not
-  percentage returns.
-- `is_buyer_maker = 0` contributes to buy flow and `= 1` to sell flow. Other
-  values are retained in `raw_ticks` but excluded from side-specific totals.
-- The footprint uses observed price levels, a 70% volume value area, and a 3:1
-  buy/sell imbalance threshold. Histograms have 16 bins; each includes its
-  minimum and maximum so the bins can be interpreted.
-- `checksum` is FNV-1a 64-bit over the canonical ordered ticks.
-- Moments that can exceed 128 bits are serialized as exact base-10 strings
-  (schema version 2).
+- `event_id` is not a `Bar1m` field. It is in the Pulsar envelope beside
+  `event_type`, `timestamp`, `source`, `symbol`, `revision`, and `data`.
+- `bar_key` is `"{source}/{symbol}/{timestamp_ms}"`. `event_id` is
+  `"{bar_key}:r{revision}"`. Revision starts at 1 and increments when a
+  recomputed bar changes.
+- The root `schema_version` and `timestamp` are authoritative. The same values
+  are copied into `header`; consumers can validate that the copies match. The
+  envelope timestamp/revision likewise mirror `data.timestamp` and
+  `data.revision`.
+- `timestamp`, `header.timestamp`, `first_event_ts`, `last_event_ts`,
+  `raw_ticks[].time`, and the bar/event timestamps are Unix UTC milliseconds.
+  `raw_ticks[].time` is the input microsecond timestamp truncated to
+  milliseconds. `raw_ticks[].time_us` preserves the exact input timestamp in
+  microseconds and is the timestamp used by the checksum. Inter-arrival fields
+  are microseconds.
+- `first_trade_id_raw` and `last_trade_id_raw` are the authoritative IDs.
+  `first_trade_id`/`last_trade_id` contain the parsed `u64` when possible;
+  otherwise they contain FNV-1a 64-bit of the UTF-8 ID bytes. Such hashes can
+  collide and must not be treated as the original IDs. `trade_ids_numeric` is 1
+  only when every ID parses as `u64`.
+- `source_id` and `symbol_id` come from separate persistent registries in
+  `AGGREGATOR_ID_REGISTRY`, assigned from the first available positive ID.
+  Preserve/share that registry to keep the mappings stable. `aggregation_level`
+  is 1 for one-minute bars; `price_scale` and `quantity_scale` are decimal
+  exponents, both 8; `time_unit=1` means milliseconds.
+
+## Metric and flag conventions
+
+- Input `price` and `qty` are integer values scaled by `10^8`; notional is
+  their integer product. All price-change fields are integer price changes,
+  not percentage returns. The v3 field names use “change” to make this explicit.
+- `buy_trade_ratio` and `sell_trade_ratio` are trade-count fractions multiplied
+  by `10^8`, computed over known-side trades; both are zero if there are none.
+  `trade_intensity` is `n_trades * 10^8 / active_seconds`, where
+  `active_seconds` counts occupied one-second buckets. `price_efficiency` is
+  `(close - open) * 10^8 / sum(abs(consecutive price changes))`, or zero when
+  the denominator is zero.
+- `is_buyer_maker=0` contributes to buy flow and `=1` to sell flow. Other
+  values remain in `raw_ticks` and contribute to `total_qty`/`total_notional`,
+  but not buy/sell totals. Therefore consumers must not assume
+  `total_qty = buy_qty + sell_qty`.
+- Footprint levels are ordered by ascending observed price. A level is a buy
+  imbalance if buy quantity is at least 3 times sell quantity (or sell is zero
+  and buy is positive); sell imbalance is symmetric. `stacked_*_imbalance` is
+  the longest run of consecutive observed levels with that side's imbalance;
+  adjacent observed prices need not be one tick apart. Footprint level flag bit
+  0 means buy imbalance and bit 1 means sell imbalance.
+- The value area expands outwards from the point of control until it includes
+  at least 70% of total quantity. Ties in point-of-control volume prefer the
+  lower price; expansion ties prefer the higher price.
+- Histograms have 16 equal-width bins. The bin for value `x` is
+  `floor((x-min)*16/(max-min))`, capped at bin 15; when `min=max`, all values go
+  in bin 0. `*_min` and `*_max` are observed extrema, not bin edges.
+  `trade_size_hist` counts quantities; `price_change_hist` counts consecutive
+  integer price changes; `interarrival_hist` counts microsecond inter-arrival
+  times. `price_volume_hist` uses observed prices as bin values and weights
+  each tick by its raw quantity. Thus the first three histograms count trades;
+  the price-volume histogram sums quantities per bin.
+- `positive_change_magnitude` and `negative_change_magnitude` sum the absolute
+  positive and negative price changes respectively. They are not the
+  components of `realized_variance`, which is the sum of squared price changes.
+  High-order moments use exact decimal strings because they can exceed 128 bits;
+  other wide integer values are also strings in v3 for JSON consumer safety.
+- Header `flags` bit 0 means at least one coverage flag is set. Bit 1 is
+  currently always set and reserved; consumers should not assign it another
+  meaning. `coverage_flags` bits are: 0 receive time unavailable; 1 at least one
+  non-numeric ID; 2 duplicate count unavailable; 3 arrival order unavailable;
+  4 unknown side value; 5 expected count unavailable; 6 invalid/drop counts
+  unavailable. `quality_flags` currently copies `coverage_flags`.
+- `unfinished_auction_high` is 1 when the highest-price level has zero sell
+  quantity; `unfinished_auction_low` is 1 when the lowest-price level has zero
+  buy quantity. These and `sequence_contiguous` are encoded as 0/1.
+  `sequence_contiguous` is 1 only when every ID parses as `u64` and the sorted
+  IDs have no duplicate, reversal, or gap.
+
+## Checksum and source coverage
+
+- `checksum` is FNV-1a 64-bit over ticks in the exact `raw_ticks` order. Start
+  with offset basis `0xcbf29ce484222325`; for each tick append, in order:
+  `source`, `symbol`, and `id` as UTF-8 bytes, each preceded by its byte length
+  as an unsigned 64-bit big-endian integer; then `time_us` as signed 64-bit
+  big-endian, `price` and `qty` as unsigned 64-bit big-endian, and
+  `is_buyer_maker` as one byte. For each byte, XOR it into the hash then
+  multiply with wrapping arithmetic by `0x100000001b3`. The result is an
+  unsigned 64-bit decimal string in JSON. IDs are always encoded as text.
 - The `ticks` table does not contain receive timestamps, original arrival
   order, pre-deduplication duplicate counts, expected tick counts, or rejected
   and dropped tick counts. Numeric fields required for those values are set to
   zero, and `coverage_flags`/`quality_flags` indicate missing coverage.
-  `raw_ticks[].time` has millisecond resolution; the checksum is calculated
-  using the input timestamp in microseconds.
-- Numeric IDs are used to order ticks and check for sequence gaps. Non-numeric
-  IDs are preserved as text in `identity` and `raw_ticks`.
-- `revision` starts at 1 and increases when a bar changes after being
-  recomputed for late ticks within `REPROCESS_MINUTES`. `event_id` is stable
-  for each bar revision.

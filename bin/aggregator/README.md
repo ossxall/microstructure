@@ -23,7 +23,10 @@ creates `bars_1m`, `bar_events` (the event outbox), and `aggregator_state`.
 - A bar is created for each `(source, symbol)` with at least one tick. Empty
   minutes do not produce bars.
 - The persisted JSON contains the schema from `logic.md` and the ordered
-  `raw_ticks`, retaining every field available in the QuestDB tick row.
+  `raw_ticks`, retaining every field available in the QuestDB tick row plus
+  `time_us` so consumers can independently verify the checksum.
+- Pulsar events wrap the bar in `data`; `event_id` is an envelope field, not a
+  `Bar1m` field. Consumers should deduplicate by that stable ID.
 - The bar and a pending event-outbox row are written to QuestDB before the
   event is sent, using separate durable QWP flushes so large bar payloads do not
   exceed QuestDB's per-frame limit. If the process stops between those writes,
@@ -47,19 +50,20 @@ Use the deterministic `event_id` for consumer-side idempotency.
 
 `price` and `qty` remain integers scaled by `10^8`; notional is their integer
 product. `is_buyer_maker=0` contributes to buy flow and `=1` to sell flow;
-other values are retained in `raw_ticks` and excluded from side-specific
-totals. Price “returns” and their moments/histogram use integer price changes,
-not percentage returns. Inter-arrival times are microseconds.
+other values remain in `raw_ticks` and contribute to total flow, but are
+excluded from side-specific totals. Price changes and their moments/histogram
+are integer price changes, not percentage returns. Inter-arrival times are
+microseconds.
 
 The footprint uses observed price levels, a 70% volume value area, and a 3:1
 buy/sell imbalance threshold. The histogram fields have 16 equal-width bins;
 each histogram also includes its minimum and maximum so its bins can be
-interpreted. `checksum` is FNV-1a 64-bit over the canonical ordered tick
-records.
+interpreted. See `logic.md` for formulas, flag assignments, and the exact
+checksum byte encoding.
 
-High-order moments that can exceed 128 bits are encoded as exact base-10 strings
-in schema version 2; this avoids failing or truncating bars when scaled values
-are raised to the third or fourth power.
+In schema version 3, every signed or unsigned 64-bit and 128-bit integer is
+serialized as an exact base-10 JSON string (including histogram arrays). This
+avoids precision loss in JavaScript and other binary64-based consumers.
 
 Some integrity inputs are not present in the current `ticks` schema: receive
 timestamps, original arrival order, pre-dedup duplicate counts, expected

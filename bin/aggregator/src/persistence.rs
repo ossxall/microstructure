@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::model::{Bar1m, Tick};
+use crate::model::{Bar1m, Tick, decimal_string};
 use anyhow::{Context, Result, ensure};
 use questdb::{
     QuestDb,
@@ -47,9 +47,11 @@ pub const STATE_KEY: &str = "minute-cursor";
 pub struct BarEvent<'a> {
     pub event_id: &'a str,
     pub event_type: &'static str,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub timestamp: u64,
     pub source: &'a str,
     pub symbol: &'a str,
+    #[serde(serialize_with = "decimal_string::serialize")]
     pub revision: u64,
     pub data: &'a Bar1m,
 }
