@@ -122,11 +122,7 @@ async fn main() -> Result<()> {
 }
 
 async fn connect_questdb(config: &Config) -> Result<Arc<QuestDb>> {
-    let connect_string = format!(
-        "{};sf_dir={};sf_durability=periodic;request_durable_ack=local;sender_pool_min=1;sender_pool_max=1;",
-        config.questdb_connect.trim_end_matches(';'),
-        config.questdb_sf_dir.display()
-    );
+    let connect_string = questdb_connect_string(config);
     let db = tokio::task::spawn_blocking(move || {
         let db = persistence::connect(&connect_string)?;
         persistence::ensure_schema(&db)?;
@@ -139,6 +135,17 @@ async fn connect_questdb(config: &Config) -> Result<Arc<QuestDb>> {
         "Connected to QuestDB and verified aggregator schemas"
     );
     Ok(db)
+}
+
+fn questdb_connect_string(config: &Config) -> String {
+    format!(
+        "{};sf_dir={};sf_durability=periodic;request_durable_ack=local;\
+         sender_pool_min=1;sender_pool_max=1;max_buf_size={};sf_max_segment_bytes={};",
+        config.questdb_connect.trim_end_matches(';'),
+        config.questdb_sf_dir.display(),
+        config.questdb_max_buf_size_bytes,
+        config.questdb_sf_max_segment_bytes
+    )
 }
 
 fn aligned_next_poll(config: &Config, period: Duration) -> Instant {
@@ -413,4 +420,37 @@ async fn send_event(producer: &mut Producer<TokioExecutor>, event: &PendingEvent
         "Published persisted 1-minute bar event"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::questdb_connect_string;
+    use crate::config::Config;
+    use std::path::PathBuf;
+
+    #[test]
+    fn questdb_connection_applies_frame_limits_and_keeps_them_above_the_reported_failure() {
+        let config = Config {
+            pulsar_url: "pulsar://localhost:6650".to_string(),
+            pulsar_topic: "persistent://public/default/bars-1m".to_string(),
+            questdb_connect: "ws::addr=localhost:9000".to_string(),
+            questdb_sf_dir: PathBuf::from("/tmp/aggregator-sf"),
+            questdb_max_buf_size_bytes: 32 * 1024 * 1024,
+            questdb_sf_max_segment_bytes: 32 * 1024 * 1024,
+            id_registry_path: PathBuf::from("/tmp/aggregator-ids.json"),
+            poll_interval_seconds: 60,
+            allowed_lateness_seconds: 5,
+            reprocess_minutes: 5,
+        };
+
+        let connect_string = questdb_connect_string(&config);
+        assert!(connect_string.contains("max_buf_size=33554432"));
+        assert!(connect_string.contains("sf_max_segment_bytes=33554432"));
+        assert!(
+            questdb::ingress::SenderBuilder::from_conf(
+                "ws::addr=localhost:9000;max_buf_size=33554432;sf_max_segment_bytes=33554432;"
+            )
+            .is_ok()
+        );
+    }
 }

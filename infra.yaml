@@ -19,6 +19,7 @@ services:
     restart: unless-stopped
     environment:
       QDB_CAIRO_COMMIT_MODE: adaptive
+      QDB_HTTP_NET_CONNECTION_RCVBUF: 16M
     ports:
       - "9000:9000"
     volumes:

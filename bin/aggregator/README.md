@@ -28,11 +28,18 @@ creates `bars_1m`, `bar_events` (the event outbox), and `aggregator_state`.
 - Pulsar events wrap the bar in `data`; `event_id` is an envelope field, not a
   `Bar1m` field. Consumers should deduplicate by that stable ID.
 - The bar and a pending event-outbox row are written to QuestDB before the
-  event is sent, using separate durable QWP flushes so large bar payloads do not
-  exceed QuestDB's per-frame limit. If the process stops between those writes,
-  rescanning the bucket repairs the missing outbox row. The outbox is retried
-  after failures/restarts. Event delivery is **at least once**; consumers should
-  deduplicate using `event_id`, which is stable for a bar revision.
+  event is sent, using separate durable QWP flushes. Each individual row must
+  still fit in one QWP frame. The aggregator configures both `max_buf_size` and
+  `sf_max_segment_bytes` to 32 MiB by default. The development QuestDB service
+  in `infra.yaml` sets `http.net.connection.rcvbuf` to 16 MiB, allowing QWP to
+  advertise a frame cap of up to 16 MiB (the protocol ceiling). A lower
+  server-advertised limit still applies in external deployments. This QuestDB
+  setting is startup-only; recreate the container after changing it. If a row
+  exceeds the effective frame limit, that bucket fails and is retried on the
+  next poll. If the process stops between the two writes,
+  rescanning the bucket repairs the missing outbox row. Event delivery is **at
+  least once**; consumers should deduplicate using `event_id`, which is stable
+  for a bar revision.
 - Bars use `(time, source, symbol)` as the QuestDB UPSERT key. If a tick arrives
   late within `REPROCESS_MINUTES`, the aggregator recomputes the affected bar,
   increments its revision, upserts it, and emits a new event.
@@ -100,6 +107,8 @@ aggregator instance to preserve stable IDs.
 | `PULSAR_BARS_TOPIC` | `persistent://public/default/bars-1m` | Bar event topic |
 | `QUESTDB_CONNECT` | `ws::addr=localhost:9000` | QuestDB QWP connection |
 | `QUESTDB_SF_DIR` | `./data/questdb-sf` | Persistent QuestDB client store-and-forward directory |
+| `QUESTDB_MAX_BUF_SIZE_BYTES` | `33554432` | Maximum encoded QuestDB client buffer size; must be at least 32 MiB and no smaller than the segment size |
+| `QUESTDB_SF_MAX_SEGMENT_BYTES` | `33554432` | QuestDB store-and-forward segment size; must be at least 32 MiB |
 | `POLL_INTERVAL_SECONDS` | `60` | Aggregator polling cadence |
 | `ALLOWED_LATENESS_SECONDS` | `5` | Delay after minute close before first calculation |
 | `REPROCESS_MINUTES` | `5` | Recent minutes rescanned for late ticks |

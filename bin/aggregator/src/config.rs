@@ -13,11 +13,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::{
     env,
     path::{Path, PathBuf},
 };
+
+const DEFAULT_QUESTDB_MAX_BUF_SIZE_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_QUESTDB_SF_MAX_SEGMENT_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -25,6 +28,8 @@ pub struct Config {
     pub pulsar_topic: String,
     pub questdb_connect: String,
     pub questdb_sf_dir: PathBuf,
+    pub questdb_max_buf_size_bytes: usize,
+    pub questdb_sf_max_segment_bytes: u64,
     pub id_registry_path: PathBuf,
     pub poll_interval_seconds: u64,
     pub allowed_lateness_seconds: u64,
@@ -44,6 +49,14 @@ impl Config {
             pulsar_topic: read("PULSAR_BARS_TOPIC", "persistent://public/default/bars-1m"),
             questdb_connect: read("QUESTDB_CONNECT", "ws::addr=localhost:9000"),
             questdb_sf_dir: resolve_path("QUESTDB_SF_DIR", "./data/questdb-sf"),
+            questdb_max_buf_size_bytes: read_parse(
+                "QUESTDB_MAX_BUF_SIZE_BYTES",
+                DEFAULT_QUESTDB_MAX_BUF_SIZE_BYTES,
+            )?,
+            questdb_sf_max_segment_bytes: read_parse(
+                "QUESTDB_SF_MAX_SEGMENT_BYTES",
+                DEFAULT_QUESTDB_SF_MAX_SEGMENT_BYTES,
+            )?,
             id_registry_path: resolve_path("AGGREGATOR_ID_REGISTRY", "./data/ids.json"),
             poll_interval_seconds: read_parse("POLL_INTERVAL_SECONDS", 60)?,
             allowed_lateness_seconds: read_parse("ALLOWED_LATENESS_SECONDS", 5)?,
@@ -67,6 +80,18 @@ impl Config {
         {
             bail!("QUESTDB_SF_DIR must be a non-empty path without semicolons");
         }
+        if config.questdb_max_buf_size_bytes < DEFAULT_QUESTDB_MAX_BUF_SIZE_BYTES {
+            bail!("QUESTDB_MAX_BUF_SIZE_BYTES must be at least 33554432 (32 MiB)");
+        }
+        if config.questdb_sf_max_segment_bytes < DEFAULT_QUESTDB_SF_MAX_SEGMENT_BYTES {
+            bail!("QUESTDB_SF_MAX_SEGMENT_BYTES must be at least 33554432 (32 MiB)");
+        }
+        ensure!(
+            u64::try_from(config.questdb_max_buf_size_bytes)?
+                >= config.questdb_sf_max_segment_bytes,
+            "QUESTDB_MAX_BUF_SIZE_BYTES must be greater than or equal to \
+             QUESTDB_SF_MAX_SEGMENT_BYTES"
+        );
         if config.id_registry_path.as_os_str().is_empty() {
             bail!("AGGREGATOR_ID_REGISTRY cannot be empty");
         }
@@ -89,9 +114,11 @@ impl Config {
                 option_name.to_ascii_lowercase().as_str(),
                 "sf_dir"
                     | "sf_durability"
+                    | "sf_max_segment_bytes"
                     | "request_durable_ack"
                     | "sender_pool_min"
                     | "sender_pool_max"
+                    | "max_buf_size"
             ) {
                 bail!("QUESTDB_CONNECT cannot override aggregator-managed option {option_name}");
             }
