@@ -19,7 +19,8 @@ use tracing::info;
 
 pub async fn start_http_server(state: AppState) {
     let app: Router = Router::new()
-    .nest("/api/market", routes::router()).with_state(state);
+        .nest("/api/market", routes::router())
+        .with_state(state);
 
     let listener: tokio::net::TcpListener =
         tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();

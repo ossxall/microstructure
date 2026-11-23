@@ -31,14 +31,14 @@ creates `bars_1m`, `bar_events` (the event outbox), and `aggregator_state`.
   event is sent, using separate durable QWP flushes. Each individual row must
   still fit in one QWP frame. The aggregator configures both `max_buf_size` and
   `sf_max_segment_bytes` to 32 MiB by default. The development QuestDB service
-  in `infra.yaml` sets `http.recv.buffer.size` to 16 MiB, allowing QWP to
-  advertise a frame cap of almost 16 MiB (the protocol ceiling minus the
-  WebSocket header). A lower
-  server-advertised limit still applies in external deployments. Compose applies
-  this environment value when the container starts, so recreate it after
-  changing the value. If a row
-  exceeds the effective frame limit, that bucket fails and is retried on the
-  next poll. If the process stops between the two writes,
+  in `infra.yaml` sets `http.recv.buffer.size` to 16 MiB for QWP writes and
+  `http.send.buffer.size` to 16 MiB for QWP query results. The latter must be
+  larger than the largest outbox payload: QuestDB's 2 MiB default cannot return
+  a single larger event row. Configure a sufficiently large send buffer in
+  external deployments too. Compose applies these values when the container
+  starts, so recreate QuestDB after changing them. If a row exceeds the
+  effective frame or send-buffer limit, processing/publishing fails and retries
+  on the next poll. If the process stops between the two writes,
   rescanning the bucket repairs the missing outbox row. Event delivery is **at
   least once**; consumers should deduplicate using `event_id`, which is stable
   for a bar revision.

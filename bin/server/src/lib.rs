@@ -13,9 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-pub mod models;
-pub mod state;
-pub mod routes;
 pub mod handlers;
+pub mod models;
+pub mod routes;
 pub mod server;
+pub mod state;
 pub mod ws;

@@ -84,7 +84,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         if current_subscription.as_ref() == Some(&subscription) {
                             continue;
                         }
-                        drop(consumer.take());
+                        unsubscribe_consumer(&mut consumer).await;
 
                         // Every client consumes the shared 1-minute bar topic.
                         match state
@@ -97,6 +97,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             )
                             .with_options(ConsumerOptions {
                                 initial_position: InitialPosition::Latest,
+                                durable: Some(false),
                                 ..Default::default()
                             })
                             .build()
@@ -133,7 +134,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
                     // Handle cancel subscription request from the client.
                     if cmd.action == "unsubscribe" {
-                        consumer = None;
+                        unsubscribe_consumer(&mut consumer).await;
                         current_subscription = None;
                     }
                  }
@@ -175,10 +176,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
                         // Acknowledge both forwarded events and events filtered out for this
                         // source/symbol so the per-client subscription does not retain them.
-                        if let Some(c) = consumer.as_mut() {
-                            if let Err(err) = c.ack(&msg).await {
-                                error!("Failed to acknowledge Pulsar bar event: {:?}", err);
-                            }
+                        if let Some(c) = consumer.as_mut()
+                            && let Err(err) = c.ack(&msg).await
+                        {
+                            error!("Failed to acknowledge Pulsar bar event: {:?}", err);
                         }
                     }
 
@@ -199,5 +200,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 
+    unsubscribe_consumer(&mut consumer).await;
     info!("WS closed");
+}
+
+async fn unsubscribe_consumer(consumer: &mut Option<Consumer<Vec<u8>, TokioExecutor>>) {
+    if let Some(mut consumer) = consumer.take()
+        && let Err(err) = consumer.unsubscribe().await
+    {
+        error!("Failed to unsubscribe from Pulsar bar events: {:?}", err);
+    }
 }

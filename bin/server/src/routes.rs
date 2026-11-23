@@ -18,7 +18,10 @@ use crate::{
     state::AppState,
     ws::handler::ws_handler,
 };
-use axum::{Router, routing::{get, post}};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 
 pub fn router() -> Router<AppState> {
     Router::new()
