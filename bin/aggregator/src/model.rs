@@ -14,10 +14,11 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use anyhow::{Context, Result, ensure};
+use num_bigint::{BigInt, BigUint};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u16 = 1;
+pub const SCHEMA_VERSION: u16 = 2;
 pub const HISTOGRAM_BUCKETS: usize = 16;
 pub const PRICE_SCALE: u8 = 8;
 pub const QUANTITY_SCALE: u8 = 8;
@@ -180,11 +181,11 @@ pub struct Returns {
     pub return_first: i64,
     pub return_last: i64,
     pub return_sum: i128,
-    pub return_sum_sq: u128,
-    pub return_sum_cu: i128,
-    pub return_sum_qu: u128,
-    pub realized_variance: u128,
-    pub bipower_variation: u128,
+    pub return_sum_sq: String,
+    pub return_sum_cu: String,
+    pub return_sum_qu: String,
+    pub realized_variance: String,
+    pub bipower_variation: String,
     pub positive_variation: u128,
     pub negative_variation: u128,
     pub max_return: i64,
@@ -194,9 +195,9 @@ pub struct Returns {
 #[derive(Debug, Clone, Serialize)]
 pub struct TradeSizeStatistics {
     pub size_sum: u128,
-    pub size_sum_sq: u128,
-    pub size_sum_cu: u128,
-    pub size_sum_qu: u128,
+    pub size_sum_sq: String,
+    pub size_sum_cu: String,
+    pub size_sum_qu: String,
     pub max_size: u128,
     pub min_size: u128,
     pub mean_size: u128,
@@ -490,37 +491,26 @@ pub fn build_bar(
     }
 
     let mut return_sum = 0_i128;
-    let mut return_sum_sq = 0_u128;
-    let mut return_sum_cu = 0_i128;
-    let mut return_sum_qu = 0_u128;
+    let mut return_sum_sq = BigUint::default();
+    let mut return_sum_cu = BigInt::default();
+    let mut return_sum_qu = BigUint::default();
     let mut positive_variation = 0_u128;
     let mut negative_variation = 0_u128;
-    let mut bipower_variation = 0_u128;
+    let mut bipower_variation = BigUint::default();
     for (index, change) in price_changes.iter().enumerate() {
         let delta = i128::from(*change);
         let abs_delta = delta.unsigned_abs();
-        let square = abs_delta
-            .checked_mul(abs_delta)
-            .context("squared price change overflows u128")?;
-        let cube = delta
-            .checked_mul(delta)
-            .and_then(|v| v.checked_mul(delta))
-            .context("cubed price change overflows i128")?;
-        let fourth = square
-            .checked_mul(square)
-            .context("fourth power of price change overflows u128")?;
+        let abs_delta_big = BigUint::from(abs_delta);
+        let square = &abs_delta_big * &abs_delta_big;
+        let cube_value = BigInt::from(delta);
+        let cube = &cube_value * &cube_value * &cube_value;
+        let fourth = &square * &square;
         return_sum = return_sum
             .checked_add(delta)
             .context("sum of price changes overflows i128")?;
-        return_sum_sq = return_sum_sq
-            .checked_add(square)
-            .context("squared price changes overflow u128")?;
-        return_sum_cu = return_sum_cu
-            .checked_add(cube)
-            .context("cubed price changes overflow i128")?;
-        return_sum_qu = return_sum_qu
-            .checked_add(fourth)
-            .context("fourth-power price changes overflow u128")?;
+        return_sum_sq += &square;
+        return_sum_cu += cube;
+        return_sum_qu += fourth;
         if delta > 0 {
             positive_variation = positive_variation
                 .checked_add(abs_delta)
@@ -532,45 +522,24 @@ pub fn build_bar(
         }
         if index > 0 {
             let previous_abs = i128::from(price_changes[index - 1]).unsigned_abs();
-            bipower_variation = bipower_variation
-                .checked_add(
-                    previous_abs
-                        .checked_mul(abs_delta)
-                        .context("bipower product overflows u128")?,
-                )
-                .context("bipower variation overflows u128")?;
+            bipower_variation += BigUint::from(previous_abs) * &abs_delta_big;
         }
     }
 
     let mut size_sum = 0_u128;
-    let mut size_sum_sq = 0_u128;
-    let mut size_sum_cu = 0_u128;
-    let mut size_sum_qu = 0_u128;
+    let mut size_sum_sq = BigUint::default();
+    let mut size_sum_cu = BigUint::default();
+    let mut size_sum_qu = BigUint::default();
     for size in &sizes {
         let value = u128::try_from(*size)?;
-        let square = value
-            .checked_mul(value)
-            .context("squared size overflows u128")?;
+        let value_big = BigUint::from(value);
+        let square = &value_big * &value_big;
         size_sum = size_sum
             .checked_add(value)
             .context("size sum overflows u128")?;
-        size_sum_sq = size_sum_sq
-            .checked_add(square)
-            .context("squared size sum overflows u128")?;
-        size_sum_cu = size_sum_cu
-            .checked_add(
-                square
-                    .checked_mul(value)
-                    .context("cubed size overflows u128")?,
-            )
-            .context("cubed size sum overflows u128")?;
-        size_sum_qu = size_sum_qu
-            .checked_add(
-                square
-                    .checked_mul(square)
-                    .context("fourth-power size overflows u128")?,
-            )
-            .context("fourth-power size sum overflows u128")?;
+        size_sum_sq += &square;
+        size_sum_cu += &square * &value_big;
+        size_sum_qu += &square * &square;
     }
 
     let mut interarrivals = Vec::<u64>::with_capacity(event_times_us.len().saturating_sub(1));
@@ -759,11 +728,11 @@ pub fn build_bar(
             return_first: first_change,
             return_last: last_change,
             return_sum,
-            return_sum_sq,
-            return_sum_cu,
-            return_sum_qu,
-            realized_variance: return_sum_sq,
-            bipower_variation,
+            return_sum_sq: return_sum_sq.to_str_radix(10),
+            return_sum_cu: return_sum_cu.to_str_radix(10),
+            return_sum_qu: return_sum_qu.to_str_radix(10),
+            realized_variance: return_sum_sq.to_str_radix(10),
+            bipower_variation: bipower_variation.to_str_radix(10),
             positive_variation,
             negative_variation,
             max_return,
@@ -771,9 +740,9 @@ pub fn build_bar(
         },
         trade_size_statistics: TradeSizeStatistics {
             size_sum,
-            size_sum_sq,
-            size_sum_cu,
-            size_sum_qu,
+            size_sum_sq: size_sum_sq.to_str_radix(10),
+            size_sum_cu: size_sum_cu.to_str_radix(10),
+            size_sum_qu: size_sum_qu.to_str_radix(10),
             max_size: max_trade_qty,
             min_size: u128::from(ordered.iter().map(|tick| tick.qty).min().unwrap_or(0)),
             mean_size: size_sum / u128::from(n_trades),
@@ -1115,5 +1084,25 @@ mod tests {
         .unwrap();
         assert_eq!(bar.price.open, 100);
         assert_eq!(bar.price.close, 110);
+    }
+
+    #[test]
+    fn preserves_fourth_moments_beyond_u128_range() {
+        let bar = build_bar(
+            &[
+                tick(1_000, "1", 1, 5_000_000_000, 0),
+                tick(2_000, "2", 5_000_000_001, 1, 1),
+            ],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(bar.schema_version, 2);
+        assert_eq!(bar.returns.return_sum_qu.len(), 39);
+        assert!(bar.returns.return_sum_qu.starts_with("625"));
+        assert_eq!(bar.trade_size_statistics.size_sum_qu.len(), 39);
+        assert!(bar.trade_size_statistics.size_sum_qu.starts_with("625"));
     }
 }

@@ -26,6 +26,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "dotenvy",
+ "num-bigint",
  "pulsar",
  "questdb-rs",
  "serde",

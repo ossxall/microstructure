@@ -84,7 +84,10 @@ async fn main() -> Result<()> {
     )
     .await
     {
-        error!(%error, "Aggregator startup cycle failed; it will retry on the next poll");
+        error!(
+            error = %format!("{error:#}"),
+            "Aggregator startup cycle failed; it will retry on the next poll"
+        );
     }
 
     loop {
@@ -97,7 +100,10 @@ async fn main() -> Result<()> {
                     &mut ids,
                     &mut next_minute_ms,
                 ).await {
-                    error!(%error, "Aggregator cycle failed; work remains recoverable from QuestDB");
+                    error!(
+                    error = %format!("{error:#}"),
+                    "Aggregator cycle failed; work remains recoverable from QuestDB"
+                    );
                 }
             }
             signal = tokio::signal::ctrl_c() => {
@@ -288,36 +294,65 @@ async fn process_bucket(
                 format!("Failed to aggregate {source}/{symbol} at {bucket_start_ms}")
             })?;
         let prior = existing.get(&(source.clone(), symbol.clone()));
+        let mut changed = true;
         if let Some(prior) = prior {
             bar.revision = prior.revision;
             let current_payload = serde_json::to_string(&bar)?;
             if current_payload == prior.payload {
-                continue;
+                changed = false;
+            } else {
+                bar.revision = prior
+                    .revision
+                    .checked_add(1)
+                    .context("Bar revision overflows u64")?;
             }
-            bar.revision = prior
-                .revision
-                .checked_add(1)
-                .context("Bar revision overflows u64")?;
         }
 
-        persist_and_queue_bar(Arc::clone(&db), &bar).await?;
+        let event_id = format!("{}:r{}", bar.bar_key, bar.revision);
+        let time_us = start_us;
+        let event_exists = {
+            let db = Arc::clone(&db);
+            let event_id = event_id.clone();
+            tokio::task::spawn_blocking(move || {
+                persistence::outbox_event_exists(&db, time_us, &event_id)
+            })
+            .await
+            .context("QuestDB outbox lookup task failed")??
+        };
+        if !changed && event_exists {
+            continue;
+        }
+
+        if changed {
+            persist_bar(Arc::clone(&db), &bar, &event_id).await?;
+        }
+        persist_event(Arc::clone(&db), &bar, &event_id).await?;
         info!(
             source = %bar.source,
             symbol = %bar.symbol,
             timestamp = bar.timestamp,
             revision = bar.revision,
             ticks = bar.identity.n_trades,
-            "Persisted 1-minute bar; queued Pulsar event"
+            "Persisted 1-minute bar and queued Pulsar event"
         );
     }
 
     Ok(())
 }
 
-async fn persist_and_queue_bar(db: Arc<QuestDb>, bar: &Bar1m) -> Result<()> {
-    let event_id = format!("{}:r{}", bar.bar_key, bar.revision);
+async fn persist_bar(db: Arc<QuestDb>, bar: &Bar1m, event_id: &str) -> Result<()> {
+    let db = Arc::clone(&db);
+    let bar = bar.clone();
+    let event_id = event_id.to_string();
+    tokio::task::spawn_blocking(move || persistence::persist_bar(&db, &bar, &event_id))
+        .await
+        .context("QuestDB bar persistence task failed")??;
+    Ok(())
+}
+
+async fn persist_event(db: Arc<QuestDb>, bar: &Bar1m, event_id: &str) -> Result<()> {
     let event = BarEvent {
-        event_id: &event_id,
+        event_id,
         event_type: "bar.1m",
         timestamp: bar.timestamp,
         source: &bar.source,
@@ -328,11 +363,12 @@ async fn persist_and_queue_bar(db: Arc<QuestDb>, bar: &Bar1m) -> Result<()> {
     let payload = serde_json::to_string(&event).context("Failed to encode bar event")?;
     let db = Arc::clone(&db);
     let bar = bar.clone();
+    let event_id = event_id.to_string();
     tokio::task::spawn_blocking(move || {
-        persistence::persist_bar_and_event(&db, &bar, &event_id, &payload)
+        persistence::persist_pending_event(&db, &bar, &event_id, &payload)
     })
     .await
-    .context("QuestDB bar persistence task failed")??;
+    .context("QuestDB outbox persistence task failed")??;
     Ok(())
 }
 

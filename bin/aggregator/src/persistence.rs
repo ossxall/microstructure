@@ -302,12 +302,7 @@ pub fn existing_bars(
     Ok(bars)
 }
 
-pub fn persist_bar_and_event(
-    db: &QuestDb,
-    bar: &Bar1m,
-    event_id: &str,
-    event_payload: &str,
-) -> Result<()> {
+pub fn persist_bar(db: &QuestDb, bar: &Bar1m, event_id: &str) -> Result<()> {
     let time_us = bar
         .timestamp
         .checked_mul(1_000)
@@ -326,6 +321,27 @@ pub fn persist_bar_and_event(
         .column_str("event_id", event_id)?
         .column_str("payload", serde_json::to_string(bar)?)?
         .at(TimestampMicros::new(time_us))?;
+
+    sender
+        .flush_buffer_and_wait(&mut buffer, AckLevel::LocalDurable)
+        .context("QuestDB did not durably acknowledge the bar")
+}
+
+pub fn persist_pending_event(
+    db: &QuestDb,
+    bar: &Bar1m,
+    event_id: &str,
+    event_payload: &str,
+) -> Result<()> {
+    let time_us = bar
+        .timestamp
+        .checked_mul(1_000)
+        .context("bar timestamp overflows QuestDB TIMESTAMP")?;
+    let time_us = i64::try_from(time_us).context("bar timestamp exceeds QuestDB range")?;
+    let mut sender = db
+        .borrow_sender()
+        .context("Failed to borrow QuestDB outbox sender")?;
+    let mut buffer = sender.new_buffer();
     buffer
         .table("bar_events")?
         .column_str("event_id", event_id)?
@@ -338,7 +354,28 @@ pub fn persist_bar_and_event(
 
     sender
         .flush_buffer_and_wait(&mut buffer, AckLevel::LocalDurable)
-        .context("QuestDB did not durably acknowledge the bar and outbox event")
+        .context("QuestDB did not durably acknowledge the bar outbox event")
+}
+
+pub fn outbox_event_exists(db: &QuestDb, time_us: i64, event_id: &str) -> Result<bool> {
+    let mut reader = db
+        .borrow_reader()
+        .context("Failed to open QuestDB outbox lookup reader")?;
+    let mut cursor = reader
+        .prepare("SELECT event_id FROM bar_events WHERE time = $1 AND event_id = $2 LIMIT 1")
+        .bind_timestamp_micros(time_us)
+        .bind_varchar(event_id)
+        .execute()
+        .context("Failed to check for an existing bar outbox event")?;
+    while let Some(batch) = cursor
+        .next_batch()
+        .context("Failed while checking bar outbox event")?
+    {
+        if batch.row_count() > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn pending_events(db: &QuestDb) -> Result<Vec<PendingEvent>> {

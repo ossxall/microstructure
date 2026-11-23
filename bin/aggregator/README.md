@@ -25,9 +25,11 @@ creates `bars_1m`, `bar_events` (the event outbox), and `aggregator_state`.
 - The persisted JSON contains the schema from `logic.md` and the ordered
   `raw_ticks`, retaining every field available in the QuestDB tick row.
 - The bar and a pending event-outbox row are written to QuestDB before the
-  event is sent. The outbox is retried after failures/restarts. Event delivery
-  is **at least once**; consumers should deduplicate using `event_id`, which is
-  stable for a bar revision.
+  event is sent, using separate durable QWP flushes so large bar payloads do not
+  exceed QuestDB's per-frame limit. If the process stops between those writes,
+  rescanning the bucket repairs the missing outbox row. The outbox is retried
+  after failures/restarts. Event delivery is **at least once**; consumers should
+  deduplicate using `event_id`, which is stable for a bar revision.
 - Bars use `(time, source, symbol)` as the QuestDB UPSERT key. If a tick arrives
   late within `REPROCESS_MINUTES`, the aggregator recomputes the affected bar,
   increments its revision, upserts it, and emits a new event.
@@ -54,6 +56,10 @@ buy/sell imbalance threshold. The histogram fields have 16 equal-width bins;
 each histogram also includes its minimum and maximum so its bins can be
 interpreted. `checksum` is FNV-1a 64-bit over the canonical ordered tick
 records.
+
+High-order moments that can exceed 128 bits are encoded as exact base-10 strings
+in schema version 2; this avoids failing or truncating bars when scaled values
+are raised to the third or fourth power.
 
 Some integrity inputs are not present in the current `ticks` schema: receive
 timestamps, original arrival order, pre-dedup duplicate counts, expected
