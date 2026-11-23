@@ -40,6 +40,7 @@ services:
         && touch /init/initialized
 
   bookie:
+    user: "0:0"  
     image: apachepulsar/pulsar:5.0.1
     hostname: bookie
     depends_on:
@@ -69,6 +70,9 @@ services:
       metadataStoreUrl: oxia://oxia:6648/default
       clusterName: cluster-a
       advertisedAddress: localhost
+      managedLedgerDefaultEnsembleSize: 1
+      managedLedgerDefaultWriteQuorum: 1
+      managedLedgerDefaultAckQuorum: 1      
     ports:
       - "6650:6650"
       - "8080:8080"

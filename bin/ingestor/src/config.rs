@@ -10,13 +10,13 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let env_dev_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env.dev");
+        let env_dev_path: std::path::PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env.dev");
         if env_dev_path.is_file() {
             dotenvy::from_path(&env_dev_path)
                 .with_context(|| format!("Failed to load {}", env_dev_path.display()))?;
         }
 
-        let source = env::var("SOURCE")
+        let source: String = env::var("SOURCE")
             .context("Missing SOURCE environment variable")?
             .trim()
             .to_ascii_lowercase();
@@ -33,7 +33,7 @@ impl Config {
             bail!("SYMBOLS must contain at least one comma-separated symbol");
         }
 
-        let pulsar_url =
+        let pulsar_url: String =
             env::var("PULSAR_URL").unwrap_or_else(|_| "pulsar://localhost:6650".to_string());
 
         Ok(Self {

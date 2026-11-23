@@ -1,4 +1,4 @@
-// BLACKER
+// BLACKER - microstructure
 // Copyright (C) 2026 Juan José Caballero Rey
 //
 // This program is free software: you can redistribute it and/or modify

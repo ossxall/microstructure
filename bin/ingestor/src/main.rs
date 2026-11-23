@@ -1,4 +1,4 @@
-// BLACKER
+// BLACKER - microstructure
 // Copyright (C) 2026 Juan José Caballero Rey
 //
 // This program is free software: you can redistribute it and/or modify
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let config = Config::from_env()?;
+    let config: Config = Config::from_env()?;
     get_source_endpoint(&config.source)?;
 
     let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(&config.pulsar_url, TokioExecutor)
@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
     let mut tasks: JoinSet<Result<()>> = JoinSet::new();
 
     tasks.spawn(listen_source_ws::run(
-        tick_tx.clone(),
+        tick_tx,
         config.source,
         config.symbols.join(","),
     ));
