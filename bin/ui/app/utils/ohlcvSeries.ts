@@ -70,6 +70,8 @@ export function createOhlcvSeries(): SeriesDefinition<ChartOhlcvBar, ChartOhlcvB
 
         ctx.fillStyle = color
         ctx.fillRect(x - halfWidth, bodyTop, candleWidth, bodyHeight)
+        ctx.strokeStyle = color
+        ctx.strokeRect(x - halfWidth, bodyTop, candleWidth, bodyHeight)
       }
     },
 
