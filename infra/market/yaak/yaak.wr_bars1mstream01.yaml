@@ -1,0 +1,20 @@
+type: websocket_request
+model: websocket_request
+id: wr_bars1mstream01
+workspaceId: wk_microstructure01
+folderId: null
+createdAt: 2026-11-23T00:00:00
+updatedAt: 2026-11-23T00:00:00
+name: Subscribe to 1m Bars
+description: Se suscribe a las barras en vivo filtradas por source y symbol.
+url: ws://localhost:3001/api/market/ws
+urlParameters: []
+headers: []
+message: |-
+  {
+    "action": "subscribe",
+    "source": "binance",
+    "symbol": "BTCUSDT"
+  }
+authenticationType: null
+sortPriority: 1

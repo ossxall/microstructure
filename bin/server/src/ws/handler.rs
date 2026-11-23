@@ -26,6 +26,8 @@ use pulsar::{Consumer, ConsumerOptions, SubType, TokioExecutor, consumer::Initia
 use serde::Deserialize;
 use tracing::{error, info};
 
+const BARS_1M_TOPIC: &str = "persistent://public/default/bars-1m";
+
 //----------------------------------------------------------------------------------------------------------------------
 // WEB SOCKET IMPLEMENTATION
 //----------------------------------------------------------------------------------------------------------------------
@@ -35,7 +37,12 @@ struct WsCommand {
     action: String,
     source: String,
     symbol: String,
-    timeframe: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BarEventIdentity {
+    source: String,
+    symbol: String,
 }
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
@@ -51,7 +58,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     let mut consumer: Option<Consumer<Vec<u8>, TokioExecutor>> = None;
 
-    let mut current_engine: Option<String> = None;
+    let mut current_subscription: Option<(String, String)> = None;
 
     loop {
         tokio::select! {
@@ -70,21 +77,20 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         continue;
                     };
 
-                    let engine_id = format!("{}-{}-{}",cmd.source, cmd.symbol, cmd.timeframe);
+                    let subscription = (cmd.source.clone(), cmd.symbol.clone());
 
                     // Handle a subscription request from the client.
                     if cmd.action == "subscribe" {
-                        if current_engine.as_deref() == Some(&engine_id) {
-                            info!("YA");
+                        if current_subscription.as_ref() == Some(&subscription) {
                             continue;
                         }
-                        // Create a new Pulsar consumer subscribed to the latest events.
+                        drop(consumer.take());
+
+                        // Every client consumes the shared 1-minute bar topic.
                         match state
                             .pulsar
                             .consumer()
-                            .with_topic(
-                                format!("persistent://public/default/live-{}", engine_id)
-                            )
+                            .with_topic(BARS_1M_TOPIC.to_string())
                             .with_subscription_type(SubType::Exclusive)
                             .with_subscription(
                                 format!("ui-{}", uuid::Uuid::now_v7())
@@ -98,8 +104,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         {
                             Ok(c) => {
                                 consumer = Some(c);
-                                current_engine = Some(engine_id.clone());
-                                info!("Subscribed {}", engine_id);
+                                current_subscription = Some(subscription);
+                                info!(
+                                    source = %cmd.source,
+                                    symbol = %cmd.symbol,
+                                    topic = BARS_1M_TOPIC,
+                                    "Subscribed to 1-minute bars"
+                                );
                             }
 
                             Err(e) => {
@@ -115,8 +126,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                         .into(),
                                     ))
                                     .await;
-
-                                consumer = None;
+                                current_subscription = None;
                             }
                         }
                     }
@@ -124,6 +134,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     // Handle cancel subscription request from the client.
                     if cmd.action == "unsubscribe" {
                         consumer = None;
+                        current_subscription = None;
                     }
                  }
 
@@ -141,25 +152,33 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 } =>  match pulsar_msg {
 
                     Some(Ok(mut msg)) => {
-                        // Take ownership of the message payload without cloning it.
-                        let data = std::mem::take(
-                            &mut msg.payload.data
+                        let should_forward = current_subscription.as_ref().is_some_and(
+                            |(source, symbol)| {
+                                serde_json::from_slice::<BarEventIdentity>(&msg.payload.data)
+                                    .is_ok_and(|event| {
+                                        event.source == *source && event.symbol == *symbol
+                                    })
+                            },
                         );
 
-                        // Forward the payload to the WebSocket client as a binary frame.
-                        // Close the loop if the client connection is no longer available.
-                        match socket.send(Message::Binary(data.into())).await {
-                            Ok(_) => {}
-
-                            Err(err) => {
+                        if should_forward {
+                            // Events are JSON; preserve the full persisted envelope and bar
+                            // payload and send it as a WebSocket text frame.
+                            let data = std::mem::take(&mut msg.payload.data);
+                            let text = String::from_utf8(data)
+                                .expect("a valid JSON event is valid UTF-8");
+                            if let Err(err) = socket.send(Message::Text(text.into())).await {
                                 info!("WebSocket send failed: {:?}", err);
                                 break;
                             }
                         }
 
-                        // Acknowledge successful message processing to Pulsar.
+                        // Acknowledge both forwarded events and events filtered out for this
+                        // source/symbol so the per-client subscription does not retain them.
                         if let Some(c) = consumer.as_mut() {
-                            c.ack(&msg).await.ok();
+                            if let Err(err) = c.ack(&msg).await {
+                                error!("Failed to acknowledge Pulsar bar event: {:?}", err);
+                            }
                         }
                     }
 
@@ -167,11 +186,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     Some(Err(e)) => {
                          info!("Pulsar error: {:?}", e);
                          consumer = None;
+                         current_subscription = None;
                     }
 
 
                     None => {
                          consumer = None;
+                         current_subscription = None;
                     }
                  }
 

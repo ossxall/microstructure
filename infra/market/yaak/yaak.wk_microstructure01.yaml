@@ -1,0 +1,12 @@
+type: workspace
+model: workspace
+id: wk_microstructure01
+createdAt: 2026-11-23T00:00:00
+updatedAt: 2026-11-23T00:00:00
+name: Microstructure Market API
+description: Peticiones HTTP y WebSocket para barras de mercado de 1 minuto.
+authenticationType: null
+headers: []
+settingValidateCertificates: true
+settingFollowRedirects: true
+settingRequestTimeout: 0

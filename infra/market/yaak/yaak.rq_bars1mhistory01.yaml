@@ -1,0 +1,25 @@
+type: http_request
+model: http_request
+id: rq_bars1mhistory01
+workspaceId: wk_microstructure01
+folderId: null
+createdAt: 2026-11-23T00:00:00
+updatedAt: 2026-11-23T00:00:00
+name: Get 1m Bar History
+description: Devuelve las barras completas más recientes, en orden cronológico.
+method: POST
+url: http://localhost:3001/api/market/get-history
+urlParameters: []
+headers:
+  - name: Content-Type
+    value: application/json
+bodyType: application/json
+body:
+  text: |-
+    {
+      "source": "binance",
+      "symbol": "BTCUSDT",
+      "limit": 500
+    }
+authenticationType: null
+sortPriority: 0

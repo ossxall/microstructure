@@ -15,32 +15,43 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
-use clickhouse::Client;
+use anyhow::{Context, Result};
 use pulsar::{Pulsar, TokioExecutor};
+use questdb::QuestDb;
 use server::{server::start_http_server, state::AppState};
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let db: Client = Client::default()
-        .with_url("http://localhost:8123")
-        .with_database("app")
-        .with_user("app")
-        .with_password("app123");
+    let questdb_connect =
+        std::env::var("QUESTDB_CONNECT").unwrap_or_else(|_| "ws::addr=localhost:9000".to_string());
+    let questdb = QuestDb::connect(&questdb_connect).context("Failed to connect to QuestDB")?;
 
-    db.query("SELECT 1").execute().await?;
+    {
+        let mut reader = questdb
+            .borrow_reader()
+            .context("Failed to open QuestDB health-check reader")?;
+        let mut cursor = reader
+            .execute("SELECT 1")
+            .context("Failed to query QuestDB")?;
+        while cursor
+            .next_batch()
+            .context("Failed while reading the QuestDB health check")?
+            .is_some()
+        {}
+    }
 
+    let pulsar_url =
+        std::env::var("PULSAR_URL").unwrap_or_else(|_| "pulsar://localhost:6650".to_string());
     let pulsar: Arc<Pulsar<TokioExecutor>> = Arc::new(
-        Pulsar::builder("pulsar://localhost:6650", TokioExecutor)
+        Pulsar::builder(pulsar_url, TokioExecutor)
             .build()
             .await
-            .expect("Invalid Pulsar URL"),
+            .context("Failed to connect to Pulsar")?,
     );
 
-    let state: AppState = AppState::new(db, pulsar);
+    let state: AppState = AppState::new(Arc::new(questdb), pulsar);
 
     start_http_server(state).await;
 
