@@ -304,8 +304,10 @@ Bar1m
   them as market semantics. These and `sequence_contiguous` are encoded as 0/1.
   `sequence_contiguous` is 1 only when every ID parses as `u64` and the
   event-time-ordered IDs have no duplicate numeric value, reversal, or gap.
-- `duplicate_count` counts repeated raw ID strings after ingestion, within this
-  bar. It cannot recover duplicates removed before the `ticks` table.
+- `duplicate_count` counts repeated IDs within this bar after ingestion.
+  Numeric IDs are compared by parsed `u64` value (so `"02"` and `"2"` are
+  duplicates); non-numeric IDs are compared by exact text. It cannot recover
+  duplicates removed before the `ticks` table.
   `out_of_order_count` counts numeric ID regressions in event-time order, not
   original arrival order; the source table does not preserve arrival order.
   `sequence_gaps` counts missing values between adjacent numeric IDs in that

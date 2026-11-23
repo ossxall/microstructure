@@ -492,7 +492,11 @@ pub fn build_bar(
     let mut checksum = 0xcbf29ce484222325_u64;
 
     for tick in &ordered {
-        if !seen_trade_ids.insert(tick.id.as_str()) {
+        let duplicate_key = match tick.id.parse::<u64>() {
+            Ok(id) => (Some(id), ""),
+            Err(_) => (None, tick.id.as_str()),
+        };
+        if !seen_trade_ids.insert(duplicate_key) {
             duplicate_count = duplicate_count
                 .checked_add(1)
                 .context("duplicate trade count overflows u64")?;
@@ -1405,6 +1409,28 @@ mod tests {
         assert_eq!(duplicate.integrity.duplicate_count, 1);
         assert_eq!(duplicate.integrity.out_of_order_count, 0);
         assert_eq!(duplicate.identity.sequence_contiguous, 0);
+
+        let numerically_equivalent = build_bar(
+            &[tick(1_000, "02", 100, 1, 0), tick(2_000, "2", 101, 1, 0)],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(numerically_equivalent.integrity.duplicate_count, 1);
+        assert_eq!(numerically_equivalent.identity.sequence_contiguous, 0);
+
+        let repeated_text_id = build_bar(
+            &[
+                tick(1_000, "trade:a", 100, 1, 0),
+                tick(2_000, "trade:a", 101, 1, 0),
+            ],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(repeated_text_id.integrity.duplicate_count, 1);
 
         let regression = build_bar(
             &[tick(1_000, "3", 100, 1, 0), tick(2_000, "2", 101, 1, 0)],

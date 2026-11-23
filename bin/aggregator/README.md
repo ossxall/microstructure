@@ -71,11 +71,12 @@ Some integrity inputs are not present in the current `ticks` schema: receive
 timestamps, original arrival order, pre-ingestion duplicate counts, expected
 sequence counts, and rejected/dropped tick counts. Their corresponding
 unavailable fields are zero, and the `coverage_flags`/`quality_flags` bits
-identify the missing coverage. `duplicate_count` still counts repeated raw IDs
-present in the bar, while `out_of_order_count` counts numeric ID regressions
-in event-time order; neither recovers original arrival order. Numeric trade IDs
-are used for ordering and gap checks; non-numeric IDs are preserved verbatim in
-both the identity section and `raw_ticks`.
+identify the missing coverage. `duplicate_count` counts repeated IDs present
+in the bar (numeric IDs by value, non-numeric IDs by exact text), while
+`out_of_order_count` counts numeric ID regressions in event-time order; neither
+recovers original arrival order. Numeric trade IDs are used for ordering and
+gap checks; non-numeric IDs are preserved verbatim in both the identity section
+and `raw_ticks`.
 
 Serialized Pulsar payload sizes depend on the number of raw ticks retained in a
 bar. Set the aggregator log filter to `debug` to record each encoded event's
