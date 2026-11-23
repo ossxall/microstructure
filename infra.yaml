@@ -5,6 +5,15 @@
 # Start with: docker compose -f infra.yaml up -d
 # Stop with:  docker compose -f infra.yaml down
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
   oxia:
     image: oxia/oxia:latest
     command: ["oxia", "standalone"]
@@ -82,6 +91,7 @@ services:
       - bin/apply-config-from-env.py conf/broker.conf && exec bin/pulsar broker
 
 volumes:
+  redis-data:
   oxia-data:
   pulsar-init:
   bookkeeper-data:
