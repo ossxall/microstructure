@@ -28,7 +28,7 @@ use questdb::QuestDb;
 use registry::IdRegistry;
 use std::{collections::BTreeMap, fs, sync::Arc, time::Duration};
 use tokio::time::{Instant, interval_at};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 const MINUTE_MS: u64 = 60_000;
@@ -202,8 +202,9 @@ async fn run_cycle(
     let Some(first_tick_us) = first_tick else {
         return Ok(());
     };
-    let earliest_tick_ms = u64::try_from(first_tick_us / 1_000)
-        .context("First tick timestamp is before the Unix epoch")?;
+    let earliest_tick_ms = u64::try_from(first_tick_us)
+        .context("First tick timestamp is before the Unix epoch")?
+        / 1_000;
     let earliest_bucket_ms = earliest_tick_ms.div_euclid(MINUTE_MS) * MINUTE_MS;
 
     let now_ms = u64::try_from(Utc::now().timestamp_millis())?;
@@ -361,6 +362,11 @@ async fn persist_event(db: Arc<QuestDb>, bar: &Bar1m, event_id: &str) -> Result<
         data: bar,
     };
     let payload = serde_json::to_string(&event).context("Failed to encode bar event")?;
+    debug!(
+        event_id,
+        payload_bytes = payload.len(),
+        "Encoded 1-minute bar event"
+    );
     let db = Arc::clone(&db);
     let bar = bar.clone();
     let event_id = event_id.to_string();

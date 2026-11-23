@@ -200,6 +200,8 @@ Bar1m
 
 - `event_id` is not a `Bar1m` field. It is in the Pulsar envelope beside
   `event_type`, `timestamp`, `source`, `symbol`, `revision`, and `data`.
+  Envelope `timestamp` and `revision` are JSON decimal strings, like the
+  corresponding fields in `Bar1m`.
 - `bar_key` is `"{source}/{symbol}/{timestamp_ms}"`. `event_id` is
   `"{bar_key}:r{revision}"`. Revision starts at 1 and increments when a
   recomputed bar changes.
@@ -211,13 +213,15 @@ Bar1m
   `raw_ticks[].time`, and the bar/event timestamps are Unix UTC milliseconds.
   `raw_ticks[].time` is the input microsecond timestamp truncated to
   milliseconds. `raw_ticks[].time_us` preserves the exact input timestamp in
-  microseconds and is the timestamp used by the checksum. Inter-arrival fields
-  are microseconds.
+  microseconds and is the timestamp used by the checksum. Negative input
+  timestamps are rejected. Inter-arrival fields are microseconds.
 - `first_trade_id_raw` and `last_trade_id_raw` are the authoritative IDs.
   `first_trade_id`/`last_trade_id` contain the parsed `u64` when possible;
   otherwise they contain FNV-1a 64-bit of the UTF-8 ID bytes. Such hashes can
   collide and must not be treated as the original IDs. `trade_ids_numeric` is 1
-  only when every ID parses as `u64`.
+  only when every ID parses as `u64`. Rust's `u64` parser accepts a leading
+  plus sign (for example, `"+5"` parses as 5); the original text is retained
+  and breaks ties between numerically equal IDs.
 - `source_id` and `symbol_id` come from separate persistent registries in
   `AGGREGATOR_ID_REGISTRY`, assigned from the first available positive ID.
   Preserve/share that registry to keep the mappings stable. `aggregation_level`
@@ -239,6 +243,11 @@ Bar1m
   values remain in `raw_ticks` and contribute to `total_qty`/`total_notional`,
   but not buy/sell totals. Therefore consumers must not assume
   `total_qty = buy_qty + sell_qty`.
+- Footprint `level_count` counts all observed prices. A level's `total_qty` is
+  the sum of its known-side buy and sell quantities, so it is zero if that
+  price only had ticks with an unknown side. The value-area target is 70% of
+  known-side quantity (`buy_qty + sell_qty`); unknown-side quantity does not
+  affect the target or level volumes.
 - Footprint levels are ordered by ascending observed price. A level is a buy
   imbalance if buy quantity is at least 3 times sell quantity (or sell is zero
   and buy is positive); sell imbalance is symmetric. `stacked_*_imbalance` is
@@ -246,32 +255,62 @@ Bar1m
   adjacent observed prices need not be one tick apart. Footprint level flag bit
   0 means buy imbalance and bit 1 means sell imbalance.
 - The value area expands outwards from the point of control until it includes
-  at least 70% of total quantity. Ties in point-of-control volume prefer the
-  lower price; expansion ties prefer the higher price.
+  at least 70% of known-side quantity. Ties in point-of-control volume prefer
+  the lower price; expansion ties prefer the higher price. When known-side
+  quantity is zero, the target is zero and the value area remains at the POC;
+  the footprint should then be interpreted with the unknown-side coverage flag.
 - Histograms have 16 equal-width bins. The bin for value `x` is
   `floor((x-min)*16/(max-min))`, capped at bin 15; when `min=max`, all values go
   in bin 0. `*_min` and `*_max` are observed extrema, not bin edges.
-  `trade_size_hist` counts quantities; `price_change_hist` counts consecutive
-  integer price changes; `interarrival_hist` counts microsecond inter-arrival
-  times. `price_volume_hist` uses observed prices as bin values and weights
-  each tick by its raw quantity. Thus the first three histograms count trades;
-  the price-volume histogram sums quantities per bin.
+  `trade_size_hist` counts trades per trade-quantity bin; it is not weighted by
+  quantity. `price_change_hist` counts consecutive integer price changes and
+  `interarrival_hist` counts microsecond inter-arrival times. `price_volume_hist`
+  uses observed prices as bin values and weights each tick by its raw quantity.
+  Thus the first three histograms count observations; the price-volume
+  histogram sums quantities per bin.
 - `positive_change_magnitude` and `negative_change_magnitude` sum the absolute
   positive and negative price changes respectively. They are not the
   components of `realized_variance`, which is the sum of squared price changes.
   High-order moments use exact decimal strings because they can exceed 128 bits;
   other wide integer values are also strings in v3 for JSON consumer safety.
+- `trade_imbalance`, `volume_imbalance`, and `notional_imbalance` are signed
+  buy-minus-sell differences for trade count, quantity, and notional. They are
+  not absolute values. `vwap` is `total_notional / total_qty`; `mean_size` and
+  `average_trade_size` are `size_sum / n_trades`. These integer divisions
+  truncate toward zero. VWAP retains the input price scale of `10^8`.
+- `direction_changes` counts reversals between consecutive non-zero price
+  changes; zero changes do not reset the previous non-zero direction.
+  `max_positive_delta` is at least zero and `max_negative_delta` is at most
+  zero, because both extrema are initialized to zero.
+- `bipower_variation` is the unscaled sum
+  `Σ |change[i]| * |change[i-1]|`; it does not include the conventional `π/2`
+  estimator factor. `absorption_buy` is total known-side buy quantity when
+  `close <= open`, and `absorption_sell` is total known-side sell quantity when
+  `close >= open`. `exhaustion_buy` is buy quantity at the highest observed
+  level when `close <= open`; `exhaustion_sell` is sell quantity at the lowest
+  observed level when `close >= open`. These absorption/exhaustion fields are
+  implementation heuristics, not independently validated market signals.
 - Header `flags` bit 0 means at least one coverage flag is set. Bit 1 is
   currently always set and reserved; consumers should not assign it another
   meaning. `coverage_flags` bits are: 0 receive time unavailable; 1 at least one
-  non-numeric ID; 2 duplicate count unavailable; 3 arrival order unavailable;
-  4 unknown side value; 5 expected count unavailable; 6 invalid/drop counts
-  unavailable. `quality_flags` currently copies `coverage_flags`.
+  non-numeric ID; 2 pre-ingestion duplicate count unavailable; 3 original
+  arrival order unavailable; 4 unknown side value; 5 expected count
+  unavailable; 6 invalid/drop counts unavailable. `quality_flags` currently
+  copies `coverage_flags`.
 - `unfinished_auction_high` is 1 when the highest-price level has zero sell
   quantity; `unfinished_auction_low` is 1 when the lowest-price level has zero
-  buy quantity. These and `sequence_contiguous` are encoded as 0/1.
-  `sequence_contiguous` is 1 only when every ID parses as `u64` and the sorted
-  IDs have no duplicate, reversal, or gap.
+  buy quantity. These are the implementation's current predicates; confirm
+  their interpretation against the intended auction convention before treating
+  them as market semantics. These and `sequence_contiguous` are encoded as 0/1.
+  `sequence_contiguous` is 1 only when every ID parses as `u64` and the
+  event-time-ordered IDs have no duplicate numeric value, reversal, or gap.
+- `duplicate_count` counts repeated raw ID strings after ingestion, within this
+  bar. It cannot recover duplicates removed before the `ticks` table.
+  `out_of_order_count` counts numeric ID regressions in event-time order, not
+  original arrival order; the source table does not preserve arrival order.
+  `sequence_gaps` counts missing values between adjacent numeric IDs in that
+  same ordered sequence. Non-numeric IDs break both regression and gap
+  comparisons.
 
 ## Checksum and source coverage
 
@@ -285,5 +324,5 @@ Bar1m
   unsigned 64-bit decimal string in JSON. IDs are always encoded as text.
 - The `ticks` table does not contain receive timestamps, original arrival
   order, pre-deduplication duplicate counts, expected tick counts, or rejected
-  and dropped tick counts. Numeric fields required for those values are set to
-  zero, and `coverage_flags`/`quality_flags` indicate missing coverage.
+  and dropped tick counts. Numeric fields for those unavailable inputs are set
+  to zero, and `coverage_flags`/`quality_flags` indicate missing coverage.

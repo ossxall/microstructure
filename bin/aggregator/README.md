@@ -56,7 +56,9 @@ are integer price changes, not percentage returns. Inter-arrival times are
 microseconds.
 
 The footprint uses observed price levels, a 70% volume value area, and a 3:1
-buy/sell imbalance threshold. The histogram fields have 16 equal-width bins;
+buy/sell imbalance threshold. The value-area target uses known-side quantity;
+unknown-side ticks remain in total flow but do not affect the footprint volume
+target. The histogram fields have 16 equal-width bins;
 each histogram also includes its minimum and maximum so its bins can be
 interpreted. See `logic.md` for formulas, flag assignments, and the exact
 checksum byte encoding.
@@ -66,12 +68,19 @@ serialized as an exact base-10 JSON string (including histogram arrays). This
 avoids precision loss in JavaScript and other binary64-based consumers.
 
 Some integrity inputs are not present in the current `ticks` schema: receive
-timestamps, original arrival order, pre-dedup duplicate counts, expected
-sequence counts, and rejected/dropped tick counts. Those values are set to
-zero where the schema requires a number, and the corresponding
-`coverage_flags`/`quality_flags` bits identify the missing coverage. Numeric
-trade IDs are used for ordering and gap checks; non-numeric IDs are preserved
-verbatim in both the identity section and `raw_ticks`.
+timestamps, original arrival order, pre-ingestion duplicate counts, expected
+sequence counts, and rejected/dropped tick counts. Their corresponding
+unavailable fields are zero, and the `coverage_flags`/`quality_flags` bits
+identify the missing coverage. `duplicate_count` still counts repeated raw IDs
+present in the bar, while `out_of_order_count` counts numeric ID regressions
+in event-time order; neither recovers original arrival order. Numeric trade IDs
+are used for ordering and gap checks; non-numeric IDs are preserved verbatim in
+both the identity section and `raw_ticks`.
+
+Serialized Pulsar payload sizes depend on the number of raw ticks retained in a
+bar. Set the aggregator log filter to `debug` to record each encoded event's
+byte size, and compare high-activity bars with the deployed broker's configured
+message limit; this repository does not assume a fixed broker limit.
 
 Because the source table has no receive timestamp, `REPROCESS_MINUTES` is the
 late-tick correction horizon, not a proof that arbitrarily late arrivals have

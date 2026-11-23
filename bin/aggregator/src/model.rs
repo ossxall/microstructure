@@ -16,7 +16,7 @@
 use anyhow::{Context, Result, ensure};
 use num_bigint::{BigInt, BigUint};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 pub const SCHEMA_VERSION: u16 = 3;
 pub const HISTOGRAM_BUCKETS: usize = 16;
@@ -36,7 +36,7 @@ pub(crate) mod decimal_string {
     }
 
     pub(crate) fn serialize_vec<T: Display, S: Serializer>(
-        values: &Vec<T>,
+        values: &[T],
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         values
@@ -68,7 +68,8 @@ pub struct Tick {
 
 impl Tick {
     pub fn time_ms(&self) -> Result<u64> {
-        u64::try_from(self.time_us / 1_000).context("tick timestamp is negative")
+        let time_us = u64::try_from(self.time_us).context("tick timestamp is negative")?;
+        Ok(time_us / 1_000)
     }
 
     fn validate(&self) -> Result<()> {
@@ -428,8 +429,18 @@ pub fn build_bar(
             .then_with(|| compare_trade_ids(&a.id, &b.id))
     });
 
+    let expected_source = ticks[0].source.as_str();
+    let expected_symbol = ticks[0].symbol.as_str();
     for tick in &ordered {
         tick.validate()?;
+        ensure!(
+            tick.source == expected_source,
+            "all ticks in a bar must have the same source"
+        );
+        ensure!(
+            tick.symbol == expected_symbol,
+            "all ticks in a bar must have the same symbol"
+        );
         let event_ms = tick.time_ms()?;
         ensure!(
             event_ms >= bucket_start_ms && event_ms < bucket_end_ms,
@@ -473,11 +484,21 @@ pub fn build_bar(
     let mut event_times_us = Vec::with_capacity(ordered.len());
     let mut raw_ticks = Vec::with_capacity(ordered.len());
     let mut sequence_gaps = 0_u64;
+    let mut duplicate_count = 0_u64;
+    let mut out_of_order_count = 0_u64;
+    let mut seen_trade_ids = HashSet::new();
     let mut sequence_contiguous = all_trade_ids_numeric;
     let mut previous_id: Option<u64> = None;
     let mut checksum = 0xcbf29ce484222325_u64;
 
     for tick in &ordered {
+        if !seen_trade_ids.insert(tick.id.as_str()) {
+            duplicate_count = duplicate_count
+                .checked_add(1)
+                .context("duplicate trade count overflows u64")?;
+            sequence_contiguous = false;
+        }
+
         let price = i64::try_from(tick.price).context("tick price exceeds i64")?;
         let qty = u128::from(tick.qty);
         let notional = u128::from(tick.price)
@@ -578,6 +599,9 @@ pub fn build_bar(
                             sequence_contiguous = false;
                         }
                     } else {
+                        out_of_order_count = out_of_order_count
+                            .checked_add(1)
+                            .context("out-of-order trade count overflows u64")?;
                         sequence_contiguous = false;
                     }
                 }
@@ -607,12 +631,26 @@ pub fn build_bar(
         price_changes.push(change);
         let direction = change.signum() as i8;
         match direction {
-            1 => upticks += 1,
-            -1 => downticks += 1,
-            _ => zero_ticks += 1,
+            1 => {
+                upticks = upticks
+                    .checked_add(1)
+                    .context("uptick counter overflows u64")?
+            }
+            -1 => {
+                downticks = downticks
+                    .checked_add(1)
+                    .context("downtick counter overflows u64")?
+            }
+            _ => {
+                zero_ticks = zero_ticks
+                    .checked_add(1)
+                    .context("zero-tick counter overflows u64")?
+            }
         }
         if direction != 0 && previous_direction != 0 && direction != previous_direction {
-            direction_changes += 1;
+            direction_changes = direction_changes
+                .checked_add(1)
+                .context("direction-change counter overflows u64")?;
         }
         if direction != 0 {
             previous_direction = direction;
@@ -727,7 +765,10 @@ pub fn build_bar(
             })
         })
         .collect::<Result<_>>()?;
-    let footprint = build_footprint(&footprint_levels, total_qty)?;
+    let known_side_qty = buy_qty
+        .checked_add(sell_qty)
+        .context("known-side quantity overflows u128")?;
+    let footprint = build_footprint(&footprint_levels, known_side_qty)?;
 
     let active_seconds = u8::try_from(activity_profile.iter().filter(|n| **n > 0).count())?;
     let change_values: Vec<i128> = price_changes.iter().map(|v| i128::from(*v)).collect();
@@ -775,7 +816,7 @@ pub fn build_bar(
         .context("price efficiency exceeds i64")?
     };
     let (absorption_buy, absorption_sell, exhaustion_buy, exhaustion_sell) =
-        calculate_absorption_exhaustion(open, close, &footprint_levels);
+        calculate_absorption_exhaustion(open, close, &footprint_levels)?;
 
     let first_change = price_changes.first().copied().unwrap_or(0);
     let last_change = price_changes.last().copied().unwrap_or(0);
@@ -915,8 +956,8 @@ pub fn build_bar(
         },
         integrity: Integrity {
             sequence_gaps,
-            duplicate_count: 0,
-            out_of_order_count: 0,
+            duplicate_count,
+            out_of_order_count,
             invalid_trade_count: 0,
             dropped_trade_count: 0,
             expected_trade_count: 0,
@@ -994,12 +1035,16 @@ fn build_footprint(levels: &[FootprintLevel], total_qty: u128) -> Result<Footpri
                 .context("footprint imbalance count overflows u32")?;
         }
         current_buy_run = if buy_imbalance {
-            current_buy_run + 1
+            current_buy_run
+                .checked_add(1)
+                .context("stacked buy imbalance count overflows u32")?
         } else {
             0
         };
         current_sell_run = if sell_imbalance {
-            current_sell_run + 1
+            current_sell_run
+                .checked_add(1)
+                .context("stacked sell imbalance count overflows u32")?
         } else {
             0
         };
@@ -1029,9 +1074,15 @@ fn calculate_absorption_exhaustion(
     open: i64,
     close: i64,
     levels: &[FootprintLevel],
-) -> (u128, u128, u128, u128) {
-    let buy_qty = levels.iter().map(|level| level.buy_qty).sum::<u128>();
-    let sell_qty = levels.iter().map(|level| level.sell_qty).sum::<u128>();
+) -> Result<(u128, u128, u128, u128)> {
+    let buy_qty = levels.iter().try_fold(0_u128, |sum, level| {
+        sum.checked_add(level.buy_qty)
+            .context("absorption buy quantity overflows u128")
+    })?;
+    let sell_qty = levels.iter().try_fold(0_u128, |sum, level| {
+        sum.checked_add(level.sell_qty)
+            .context("absorption sell quantity overflows u128")
+    })?;
     let absorption_buy = if close <= open { buy_qty } else { 0 };
     let absorption_sell = if close >= open { sell_qty } else { 0 };
     let exhaustion_buy = if close <= open {
@@ -1044,12 +1095,12 @@ fn calculate_absorption_exhaustion(
     } else {
         0
     };
-    (
+    Ok((
         absorption_buy,
         absorption_sell,
         exhaustion_buy,
         exhaustion_sell,
-    )
+    ))
 }
 
 fn histogram(values: &[i128], buckets: usize) -> Result<(Vec<u64>, i128, i128)> {
@@ -1154,11 +1205,26 @@ fn fnv64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tick, build_bar, compare_trade_ids};
+    use super::{
+        COVERAGE_UNKNOWN_SIDE_VALUE, FootprintLevel, Tick, build_bar,
+        calculate_absorption_exhaustion, compare_trade_ids,
+    };
 
     fn tick(time_ms: u64, id: &str, price: u64, qty: u64, is_buyer_maker: u8) -> Tick {
         Tick {
             time_us: i64::try_from(time_ms * 1_000).unwrap(),
+            source: "binance".to_string(),
+            symbol: "BTCUSDT".to_string(),
+            id: id.to_string(),
+            price,
+            qty,
+            is_buyer_maker,
+        }
+    }
+
+    fn tick_us(time_us: i64, id: &str, price: u64, qty: u64, is_buyer_maker: u8) -> Tick {
+        Tick {
+            time_us,
             source: "binance".to_string(),
             symbol: "BTCUSDT".to_string(),
             id: id.to_string(),
@@ -1202,6 +1268,16 @@ mod tests {
         assert_eq!(bar.identity.first_trade_id_raw, "trade:one");
         assert_eq!(bar.raw_ticks[0].id, "trade:one");
         assert_ne!(bar.identity.coverage_flags, 0);
+    }
+
+    #[test]
+    fn accepts_plus_prefixed_numeric_ids_and_preserves_the_raw_value() {
+        let bar = build_bar(&[tick(1_000, "+5", 100, 1, 0)], 0, 1, 1).unwrap();
+
+        assert_eq!(bar.identity.trade_ids_numeric, 1);
+        assert_eq!(bar.identity.first_trade_id, 5);
+        assert_eq!(bar.identity.first_trade_id_raw, "+5");
+        assert_eq!(compare_trade_ids("+5", "5"), std::cmp::Ordering::Less);
     }
 
     #[test]
@@ -1258,6 +1334,203 @@ mod tests {
         assert!(bar.price_changes.change_sum_qu.starts_with("625"));
         assert_eq!(bar.trade_size_statistics.size_sum_qu.len(), 39);
         assert!(bar.trade_size_statistics.size_sum_qu.starts_with("625"));
+    }
+
+    #[test]
+    fn rejects_ticks_before_the_unix_epoch_and_keeps_submillisecond_time() {
+        assert_eq!(
+            tick_us(60_000_999, "1", 100, 1, 0).time_ms().unwrap(),
+            60_000
+        );
+        assert!(tick_us(-1, "1", 100, 1, 0).time_ms().is_err());
+        assert!(build_bar(&[tick_us(-1, "1", 100, 1, 0)], 0, 1, 1).is_err());
+
+        let bar = build_bar(&[tick_us(60_000_999, "1", 100, 1, 0)], 60_000, 1, 1).unwrap();
+        assert_eq!(bar.raw_ticks[0].time, 60_000);
+        assert_eq!(bar.raw_ticks[0].time_us, 60_000_999);
+    }
+
+    #[test]
+    fn rejects_mixed_sources_or_symbols() {
+        let mut different_source = tick(1_000, "2", 101, 1, 0);
+        different_source.source = "kraken".to_string();
+        assert!(
+            build_bar(&[tick(1_000, "1", 100, 1, 0), different_source], 0, 1, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("same source")
+        );
+
+        let mut different_symbol = tick(1_000, "2", 101, 1, 0);
+        different_symbol.symbol = "ETHUSDT".to_string();
+        assert!(
+            build_bar(&[tick(1_000, "1", 100, 1, 0), different_symbol], 0, 1, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("same symbol")
+        );
+    }
+
+    #[test]
+    fn unknown_side_volume_does_not_change_the_known_side_value_area_target() {
+        let bar = build_bar(
+            &[tick(1_000, "1", 100, 100, 0), tick(2_000, "2", 90, 900, 2)],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(bar.volume_flow.total_qty, 1_000);
+        assert_eq!(bar.volume_flow.buy_qty, 100);
+        assert_eq!(bar.footprint.level_count, 2);
+        assert_eq!(bar.footprint.levels[0].price, 90);
+        assert_eq!(bar.footprint.levels[0].total_qty, 0);
+        assert_eq!(bar.footprint.value_area_low, 100);
+        assert_eq!(bar.footprint.value_area_high, 100);
+        assert_eq!(bar.volume_flow.sell_qty, 0);
+        assert_eq!(bar.raw_ticks[1].is_buyer_maker, 2);
+        assert_ne!(bar.identity.coverage_flags & COVERAGE_UNKNOWN_SIDE_VALUE, 0);
+    }
+
+    #[test]
+    fn counts_duplicate_ids_and_numeric_sequence_regressions() {
+        let duplicate = build_bar(
+            &[tick(1_000, "1", 100, 1, 0), tick(2_000, "1", 101, 1, 0)],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(duplicate.integrity.duplicate_count, 1);
+        assert_eq!(duplicate.integrity.out_of_order_count, 0);
+        assert_eq!(duplicate.identity.sequence_contiguous, 0);
+
+        let regression = build_bar(
+            &[tick(1_000, "3", 100, 1, 0), tick(2_000, "2", 101, 1, 0)],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(regression.integrity.duplicate_count, 0);
+        assert_eq!(regression.integrity.out_of_order_count, 1);
+        assert_eq!(regression.identity.sequence_contiguous, 0);
+
+        let gap = build_bar(
+            &[tick(1_000, "1", 100, 1, 0), tick(2_000, "3", 101, 1, 0)],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(gap.integrity.sequence_gaps, 1);
+        assert_eq!(gap.identity.sequence_contiguous, 0);
+    }
+
+    #[test]
+    fn handles_a_single_tick_without_changes_or_interarrivals() {
+        let bar = build_bar(&[tick(1_000, "1", 100, 7, 0)], 0, 1, 1).unwrap();
+
+        assert_eq!(bar.identity.n_trades, 1);
+        assert_eq!(bar.price_changes.change_count, 0);
+        assert_eq!(bar.price.zero_ticks, 0);
+        assert_eq!(bar.timing.interarrival_count, 0);
+        assert_eq!(bar.footprint.level_count, 1);
+        assert_eq!(bar.volume_flow.total_qty, 7);
+    }
+
+    #[test]
+    fn value_area_ties_prefer_the_higher_level_and_poc_ties_the_lower() {
+        let poc_tie = build_bar(
+            &[
+                tick(1_000, "1", 99, 2, 0),
+                tick(2_000, "2", 100, 4, 0),
+                tick(3_000, "3", 101, 4, 0),
+            ],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(poc_tie.footprint.poc_price, 100);
+
+        let value_area_tie = build_bar(
+            &[
+                tick(1_000, "1", 99, 3, 0),
+                tick(2_000, "2", 100, 5, 0),
+                tick(3_000, "3", 101, 3, 0),
+            ],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(value_area_tie.footprint.value_area_low, 100);
+        assert_eq!(value_area_tie.footprint.value_area_high, 101);
+    }
+
+    #[test]
+    fn counts_stacked_imbalance_runs_and_breaks_them_at_balanced_levels() {
+        let bar = build_bar(
+            &[
+                tick(1_000, "1", 100, 3, 0),
+                tick(2_000, "2", 101, 3, 0),
+                tick(3_000, "3", 101, 1, 1),
+                tick(4_000, "4", 102, 3, 0),
+                tick(5_000, "5", 103, 1, 0),
+                tick(6_000, "6", 103, 1, 1),
+                tick(7_000, "7", 104, 3, 1),
+                tick(8_000, "8", 105, 3, 1),
+            ],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(bar.footprint.stacked_buy_imbalance, 3);
+        assert_eq!(bar.footprint.stacked_sell_imbalance, 2);
+    }
+
+    #[test]
+    fn fails_explicitly_when_price_volume_histogram_weight_overflows() {
+        let error = build_bar(
+            &[
+                tick(1_000, "1", 1, u64::MAX, 0),
+                tick(2_000, "2", 1, u64::MAX, 0),
+            ],
+            0,
+            1,
+            1,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("price-volume histogram weight overflows")
+        );
+    }
+
+    #[test]
+    fn absorption_sums_fail_instead_of_wrapping() {
+        let level = |price, buy_qty| FootprintLevel {
+            price,
+            buy_qty,
+            sell_qty: 0,
+            buy_notional: 0,
+            sell_notional: 0,
+            buy_count: 0,
+            sell_count: 0,
+            delta: 0,
+            total_qty: 0,
+            total_count: 0,
+            flags: 0,
+        };
+        let levels = [level(100, u128::MAX), level(101, 1)];
+
+        assert!(calculate_absorption_exhaustion(100, 99, &levels).is_err());
     }
 
     #[test]
