@@ -32,7 +32,7 @@ creates `bars_1m`, `bar_events` (the event outbox), and `aggregator_state`.
   still fit in one QWP frame. The aggregator configures both `max_buf_size` and
   `sf_max_segment_bytes` to 32 MiB by default. The development QuestDB service
   in `infra.yaml` sets `http.recv.buffer.size` to 16 MiB for QWP writes and
-  `http.send.buffer.size` to 16 MiB for QWP query results. The latter must be
+  `http.send.buffer.size` to 64 MiB for QWP query results. The latter must be
   larger than the largest outbox payload: QuestDB's 2 MiB default cannot return
   a single larger event row. Configure a sufficiently large send buffer in
   external deployments too. Compose applies these values when the container
