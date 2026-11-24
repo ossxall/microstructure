@@ -90,6 +90,10 @@ export interface Bar {
   close: number
   volume: number
   revision: number
+  /** Event envelope lifecycle marker; missing history values are finalized. */
+  is_final?: boolean
+  event_id?: string
+  event_type?: string
   timestamp?: BarValue
   schema_version?: number
   source?: string

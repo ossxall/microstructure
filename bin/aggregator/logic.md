@@ -86,6 +86,25 @@ store-and-forward. Para `1m` se conservan los nombres históricos (`bars_1m`,
 por ejemplo `bars_5m`, `bar_events_5m` y `aggregator_state_5m`. Debe ejecutarse
 una sola instancia activa por timeframe y base de datos.
 
+### Eventos de barras live
+
+Además del ciclo de ventanas cerradas, el servicio sondea la ventana UTC activa
+cada `LIVE_POLL_INTERVAL_MS` (1000 ms por defecto). Agrupa los ticks disponibles
+por `(source, symbol)` y reutiliza `build_bar_for_timeframe`, por lo que `data`
+contiene el esquema completo v4, incluidas todas las secciones y `raw_ticks`;
+no se emite una estructura parcial. Solo se publica una nueva instantánea si su
+JSON cambió desde el sondeo anterior. Las ventanas sin ticks no generan eventos.
+
+Los eventos live usan el mismo topic y el mismo sobre que los eventos finales.
+El sobre incluye `is_final: false` para live y `is_final: true` para final; el
+`event_type` conserva `bar.{timeframe}`. El ID live es
+`{bar_key}:live:{n_trades}:{checksum}`, mientras que los finales conservan
+`{bar_key}:r{revision}`. Las instantáneas live no modifican la tabla histórica
+ni el outbox final: se publican directamente en Pulsar y son best effort. Si el
+proceso se reinicia, la siguiente consulta reconstruye y vuelve a publicar la
+instantánea actual si hay ticks. Como `raw_ticks` completo se incluye en cada
+evento, bajar el intervalo aumenta el tráfico y el coste de reconsulta.
+
 ## Construcción de una barra
 
 `build_bar_for_timeframe` exige al menos un tick, una duración positiva, source
@@ -296,18 +315,22 @@ Bar
 ## Sobre JSON, identidad y versiones
 
 - `event_id` no forma parte de `Bar`: es un campo del sobre Pulsar, junto con
-  `event_type`, `timestamp`, `source`, `symbol`, `timeframe`, `revision` y
-  `data`. `event_type` vale `bar.{timeframe}`. El `timestamp` y `revision` del
-  sobre son cadenas decimales JSON, igual que los campos correspondientes de la
-  barra.
+  `event_type`, `timestamp`, `source`, `symbol`, `timeframe`, `revision`,
+  `is_final` y `data`. `event_type` vale `bar.{timeframe}`. El `timestamp` y
+  `revision` del sobre son cadenas decimales JSON, igual que los campos
+  correspondientes de la barra.
 - `bar_key` tiene el formato
-  `"{source}/{symbol}/{timeframe}/{timestamp_ms}"`. `event_id` añade
-  `:r{revision}`. La revisión comienza en 1 y aumenta cuando cambia una barra
-  recalculada.
+  `"{source}/{symbol}/{timeframe}/{timestamp_ms}"`. Los eventos finales usan
+  `event_id = "{bar_key}:r{revision}"`; la revisión comienza en 1 y aumenta
+  cuando cambia una barra cerrada recalculada. Los eventos live usan
+  `"{bar_key}:live:{n_trades}:{checksum}"` y `is_final: false`; los finales
+  llevan `is_final: true`.
 - Los campos raíz `schema_version` y `timestamp` son autoritativos; se copian en
   `header` para que el consumidor pueda validar que coinciden. De igual manera,
   el timestamp y la revisión del sobre reflejan `data.timestamp` y
-  `data.revision`.
+  `data.revision`. Los snapshots live pueden tener la misma revisión de `Bar`
+  entre actualizaciones; para deduplicar eventos live se debe usar `event_id`,
+  no `revision`.
 - `timestamp`, `header.timestamp`, `first_event_ts`, `last_event_ts`,
   `raw_ticks[].time` y los timestamps de barra/evento son milisegundos Unix UTC.
   `raw_ticks[].time` trunca a milisegundos el timestamp de entrada; `time_us`

@@ -27,7 +27,7 @@ use axum::{
 use futures::StreamExt;
 use pulsar::{Consumer, ConsumerOptions, SubType, TokioExecutor, consumer::InitialPosition};
 use serde::Deserialize;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 //----------------------------------------------------------------------------------------------------------------------
 // WEB SOCKET IMPLEMENTATION
@@ -51,6 +51,23 @@ struct BarEventIdentity {
     source: String,
     symbol: String,
     timeframe: String,
+    #[serde(default)]
+    is_final: Option<bool>,
+}
+
+fn matching_event_finality(
+    payload: &[u8],
+    source: &str,
+    symbol: &str,
+    timeframe: &str,
+) -> Option<bool> {
+    let event = serde_json::from_slice::<BarEventIdentity>(payload).ok()?;
+    if event.source == source && event.symbol == symbol && event.timeframe == timeframe {
+        // Older persisted events have no is_final field and represent finalized bars.
+        Some(event.is_final.unwrap_or(true))
+    } else {
+        None
+    }
 }
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
@@ -197,23 +214,27 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 } =>  match pulsar_msg {
 
                     Some(Ok(mut msg)) => {
-                        let should_forward = current_subscription.as_ref().is_some_and(
+                        let event_finality = current_subscription.as_ref().and_then(
                             |(source, symbol, timeframe)| {
-                                serde_json::from_slice::<BarEventIdentity>(&msg.payload.data)
-                                    .is_ok_and(|event| {
-                                        event.source == *source
-                                            && event.symbol == *symbol
-                                            && event.timeframe == *timeframe
-                                    })
+                                matching_event_finality(
+                                    &msg.payload.data,
+                                    source,
+                                    symbol,
+                                    timeframe,
+                                )
                             },
                         );
 
-                        if should_forward {
-                            // Events are JSON; preserve the full persisted envelope and bar
-                            // payload and send it as a WebSocket text frame.
+                        if let Some(is_final) = event_finality {
+                            // Forward the original JSON unchanged so the event lifecycle
+                            // marker and the complete Bar payload both reach the client.
                             let data = std::mem::take(&mut msg.payload.data);
                             let text = String::from_utf8(data)
                                 .expect("a valid JSON event is valid UTF-8");
+                            debug!(
+                                is_final,
+                                "Forwarding bar event to WebSocket subscriber"
+                            );
                             if let Err(err) = socket.send(Message::Text(text.into())).await {
                                 info!("WebSocket send failed: {:?}", err);
                                 break;
@@ -260,7 +281,7 @@ async fn unsubscribe_consumer(consumer: &mut Option<Consumer<Vec<u8>, TokioExecu
 
 #[cfg(test)]
 mod tests {
-    use super::WsCommand;
+    use super::{WsCommand, matching_event_finality};
 
     #[test]
     fn websocket_subscriptions_default_to_one_minute() {
@@ -269,5 +290,48 @@ mod tests {
                 .unwrap();
 
         assert_eq!(command.timeframe, "1m");
+    }
+
+    #[test]
+    fn websocket_accepts_live_final_and_legacy_bar_events_without_transforming_them() {
+        let live = br#"{
+            "event_id":"binance/BTCUSDT/1m/0:live:2:123",
+            "source":"binance",
+            "symbol":"BTCUSDT",
+            "timeframe":"1m",
+            "is_final":false,
+            "data":{"schema_version":4,"raw_ticks":[{"id":"1"}]}
+        }"#;
+        let finalized = br#"{
+            "event_id":"binance/BTCUSDT/1m/0:r1",
+            "source":"binance",
+            "symbol":"BTCUSDT",
+            "timeframe":"1m",
+            "is_final":true,
+            "data":{"schema_version":4,"raw_ticks":[{"id":"1"}]}
+        }"#;
+        let legacy_final = br#"{
+            "source":"binance",
+            "symbol":"BTCUSDT",
+            "timeframe":"1m",
+            "data":{"schema_version":4,"raw_ticks":[{"id":"1"}]}
+        }"#;
+
+        assert_eq!(
+            matching_event_finality(live, "binance", "BTCUSDT", "1m"),
+            Some(false)
+        );
+        assert_eq!(
+            matching_event_finality(finalized, "binance", "BTCUSDT", "1m"),
+            Some(true)
+        );
+        assert_eq!(
+            matching_event_finality(legacy_final, "binance", "BTCUSDT", "1m"),
+            Some(true)
+        );
+        assert_eq!(
+            matching_event_finality(live, "binance", "ETHUSDT", "1m"),
+            None
+        );
     }
 }

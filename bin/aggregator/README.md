@@ -4,6 +4,9 @@ Builds bars for its configured timeframe from the shared `ticks` table in
 QuestDB, stores them in timeframe-isolated tables, and publishes each JSON event
 to a source/symbol/timeframe-specific Pulsar topic. The default timeframe is
 `1m`; supported timeframes are `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1d`.
+While a timeframe window is open, it also publishes a complete live snapshot
+once per `LIVE_POLL_INTERVAL_MS` when the bar has changed. The default interval
+is one second.
 
 ## Run
 
@@ -36,8 +39,20 @@ timeframes use suffixed names, for example `bars_5m`, `bar_events_5m`, and
   `time_us` so consumers can independently verify the checksum.
 - Pulsar events wrap the bar in `data`; `event_id` is an envelope field, not a
   bar field. Consumers should deduplicate by that stable ID.
-- The bar and a pending event-outbox row are written to QuestDB before the
-  event is sent, using separate durable QWP flushes. Each individual row must
+- Live events use the same complete `Bar` schema and topic as finalized events.
+  The event envelope adds `is_final: false` for live snapshots and
+  `is_final: true` for finalized bars. A live event ID is derived from the
+  `bar_key`, trade count, and checksum; finalized events retain the
+  `{bar_key}:r{revision}` ID. Live snapshots are published directly to Pulsar,
+  not written to the finalized-bars table or durable outbox. They are therefore
+  best effort; the next poll recomputes the latest snapshot after a restart.
+  Subscribers using `InitialPosition::Latest` receive snapshots published after
+  subscription, not a previously emitted live snapshot.
+- The live poll re-reads the active window and emits only when the serialized
+  `Bar` changes. Since each event contains all `raw_ticks`, frequent snapshots
+  can generate substantial query, network, and broker traffic.
+- For finalized bars, the bar and a pending event-outbox row are written to
+  QuestDB before the event is sent, using separate durable QWP flushes. Each individual row must
   still fit in one QWP frame. The aggregator configures both `max_buf_size` and
   `sf_max_segment_bytes` to 32 MiB by default. The development QuestDB service
   in `infra.yaml` sets `http.recv.buffer.size` to 16 MiB for QWP writes (the
@@ -137,6 +152,7 @@ and do not share it between active instances for the same timeframe.
 | `QUESTDB_MAX_BUF_SIZE_BYTES` | `33554432` | Maximum encoded QuestDB client buffer size; must be at least 32 MiB and no smaller than the segment size |
 | `QUESTDB_SF_MAX_SEGMENT_BYTES` | `33554432` | QuestDB store-and-forward segment size; must be at least 32 MiB |
 | `POLL_INTERVAL_SECONDS` | `60` | Aggregator polling cadence |
+| `LIVE_POLL_INTERVAL_MS` | `1000` | Live bar snapshot cadence in milliseconds; must be greater than zero |
 | `ALLOWED_LATENESS_SECONDS` | `5` | Delay after timeframe close before first calculation |
 | `REPROCESS_MINUTES` | `5` | Late-tick horizon in minutes, rounded back to complete timeframe bars (at least one closed bar) |
 | `AGGREGATOR_ID_REGISTRY` | `./data/ids.json` | Persistent source/symbol ID map |

@@ -21,6 +21,7 @@ use std::{
 
 const DEFAULT_QUESTDB_MAX_BUF_SIZE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_QUESTDB_SF_MAX_SEGMENT_BYTES: u64 = 32 * 1024 * 1024;
+const DEFAULT_LIVE_POLL_INTERVAL_MS: u64 = 1_000;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -34,6 +35,7 @@ pub struct Config {
     pub questdb_sf_max_segment_bytes: u64,
     pub id_registry_path: PathBuf,
     pub poll_interval_seconds: u64,
+    pub live_poll_interval_ms: u64,
     pub allowed_lateness_seconds: u64,
     pub reprocess_minutes: u64,
 }
@@ -74,6 +76,10 @@ impl Config {
             )?,
             id_registry_path: resolve_path("AGGREGATOR_ID_REGISTRY", "./data/ids.json"),
             poll_interval_seconds: read_parse("POLL_INTERVAL_SECONDS", 60)?,
+            live_poll_interval_ms: read_parse(
+                "LIVE_POLL_INTERVAL_MS",
+                DEFAULT_LIVE_POLL_INTERVAL_MS,
+            )?,
             allowed_lateness_seconds: read_parse("ALLOWED_LATENESS_SECONDS", 5)?,
             reprocess_minutes: read_parse("REPROCESS_MINUTES", 5)?,
         };
@@ -86,6 +92,9 @@ impl Config {
         }
         if config.poll_interval_seconds == 0 {
             bail!("POLL_INTERVAL_SECONDS must be greater than zero");
+        }
+        if config.live_poll_interval_ms == 0 {
+            bail!("LIVE_POLL_INTERVAL_MS must be greater than zero");
         }
         if config.reprocess_minutes == 0 {
             bail!("REPROCESS_MINUTES must be greater than zero");

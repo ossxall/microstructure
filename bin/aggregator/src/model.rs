@@ -1655,12 +1655,37 @@ mod tests {
             symbol: &bar.symbol,
             timeframe: &bar.timeframe,
             revision: bar.revision,
+            is_final: true,
             data: &bar,
         };
         let event_json = serde_json::to_value(event).unwrap();
         assert_eq!(event_json["timestamp"].as_str(), Some("0"));
         assert_eq!(event_json["revision"].as_str(), Some("1"));
         assert_eq!(event_json["timeframe"], "1m");
+        assert_eq!(event_json["is_final"], true);
+        assert_eq!(
+            event_json["data"]["footprint"]["levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(event_json["data"]["raw_ticks"].as_array().unwrap().len(), 2);
+
+        let live_event = crate::persistence::BarEvent {
+            event_id: "binance/BTCUSDT/1m/0:live:2:123",
+            event_type: "bar.1m",
+            timestamp: bar.timestamp,
+            source: &bar.source,
+            symbol: &bar.symbol,
+            timeframe: &bar.timeframe,
+            revision: bar.revision,
+            is_final: false,
+            data: &bar,
+        };
+        let live_event_json = serde_json::to_value(live_event).unwrap();
+        assert_eq!(live_event_json["is_final"], false);
+        assert_eq!(live_event_json["data"], event_json["data"]);
 
         let mut checksum = 0xcbf29ce484222325_u64;
         let mut append = |bytes: &[u8]| {

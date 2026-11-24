@@ -27,7 +27,7 @@ use pulsar::{Pulsar, TokioExecutor, producer::Producer};
 use questdb::QuestDb;
 use registry::IdRegistry;
 use std::{collections::BTreeMap, fs, sync::Arc, time::Duration};
-use tokio::time::{Instant, interval_at};
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -67,6 +67,10 @@ async fn main() -> Result<()> {
     let period = Duration::from_secs(config.poll_interval_seconds);
     let first_tick = aligned_next_poll(&config, period);
     let mut poll = interval_at(first_tick, period);
+    let live_period = Duration::from_millis(config.live_poll_interval_ms);
+    let mut live_poll = interval_at(Instant::now() + live_period, live_period);
+    live_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut live_snapshots = BTreeMap::<(u64, String, String), String>::new();
     let mut next_bucket_ms =
         initialize_cursor(Arc::clone(&questdb), &config.timeframe, config.timeframe_ms).await?;
 
@@ -87,6 +91,21 @@ async fn main() -> Result<()> {
             "Aggregator startup cycle failed; it will retry on the next poll"
         );
     }
+    if let Err(error) = run_live_cycle(
+        &config,
+        Arc::clone(&questdb),
+        &pulsar,
+        &mut producers,
+        &mut ids,
+        &mut live_snapshots,
+    )
+    .await
+    {
+        error!(
+            error = %format!("{error:#}"),
+            "Aggregator startup live-bar cycle failed; it will retry on the next live poll"
+        );
+    }
 
     loop {
         tokio::select! {
@@ -102,6 +121,21 @@ async fn main() -> Result<()> {
                     error!(
                     error = %format!("{error:#}"),
                     "Aggregator cycle failed; work remains recoverable from QuestDB"
+                    );
+                }
+            }
+            _ = live_poll.tick() => {
+                if let Err(error) = run_live_cycle(
+                    &config,
+                    Arc::clone(&questdb),
+                    &pulsar,
+                    &mut producers,
+                    &mut ids,
+                    &mut live_snapshots,
+                ).await {
+                    error!(
+                        error = %format!("{error:#}"),
+                        "Aggregator live-bar cycle failed; it will retry on the next live poll"
                     );
                 }
             }
@@ -285,6 +319,118 @@ async fn run_cycle(
     Ok(())
 }
 
+async fn run_live_cycle(
+    config: &Config,
+    db: Arc<QuestDb>,
+    pulsar: &Pulsar<TokioExecutor>,
+    producers: &mut BTreeMap<String, Producer<TokioExecutor>>,
+    ids: &mut IdRegistry,
+    live_snapshots: &mut BTreeMap<(u64, String, String), String>,
+) -> Result<()> {
+    let now_ms = u64::try_from(Utc::now().timestamp_millis())
+        .context("Current timestamp is before the Unix epoch")?;
+    let bucket_start_ms = now_ms.div_euclid(config.timeframe_ms) * config.timeframe_ms;
+    let bucket_end_ms = bucket_start_ms
+        .checked_add(config.timeframe_ms)
+        .context("Live timeframe bucket end overflows")?;
+    let start_us = i64::try_from(
+        bucket_start_ms
+            .checked_mul(1_000)
+            .context("Live timeframe bucket start overflows")?,
+    )?;
+    let end_us = i64::try_from(
+        bucket_end_ms
+            .checked_mul(1_000)
+            .context("Live timeframe bucket end overflows")?,
+    )?;
+
+    // Only the active timeframe is held in memory. Old snapshots are transient
+    // and are never written to the finalized bars table or its durable outbox.
+    live_snapshots.retain(|(timestamp, _, _), _| *timestamp >= bucket_start_ms);
+
+    let ticks = {
+        let db = Arc::clone(&db);
+        tokio::task::spawn_blocking(move || persistence::load_ticks(&db, start_us, end_us))
+            .await
+            .context("QuestDB live tick query task failed")??
+    };
+    let mut groups = BTreeMap::<(String, String), Vec<Tick>>::new();
+    for tick in ticks {
+        groups
+            .entry((tick.source.clone(), tick.symbol.clone()))
+            .or_default()
+            .push(tick);
+    }
+
+    for ((source, symbol), group) in groups {
+        let (source_id, symbol_id) = ids.ids_for(&source, &symbol)?;
+        let bar = build_bar_for_timeframe(
+            &group,
+            bucket_start_ms,
+            &config.timeframe,
+            config.timeframe_ms,
+            source_id,
+            symbol_id,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to build live bar for {source}/{symbol} at {bucket_start_ms} ({})",
+                config.timeframe
+            )
+        })?;
+        let snapshot_key = (bar.timestamp, bar.source.clone(), bar.symbol.clone());
+        let bar_payload =
+            serde_json::to_string(&bar).context("Failed to encode complete live bar snapshot")?;
+        if live_snapshots.get(&snapshot_key) == Some(&bar_payload) {
+            continue;
+        }
+
+        let event_id = live_event_id(&bar);
+        let event_type = format!("bar.{}", bar.timeframe);
+        let event = BarEvent {
+            event_id: &event_id,
+            event_type: &event_type,
+            timestamp: bar.timestamp,
+            source: &bar.source,
+            symbol: &bar.symbol,
+            timeframe: &bar.timeframe,
+            revision: bar.revision,
+            is_final: false,
+            data: &bar,
+        };
+        let payload = serde_json::to_string(&event).context("Failed to encode live bar event")?;
+        debug!(
+            event_id,
+            payload_bytes = payload.len(),
+            ticks = bar.identity.n_trades,
+            "Encoded complete live bar event"
+        );
+        send_payload(
+            pulsar,
+            producers,
+            &config.pulsar_namespace,
+            &bar.source,
+            &bar.symbol,
+            &bar.timeframe,
+            &event_id,
+            bar.revision,
+            false,
+            &payload,
+        )
+        .await?;
+        live_snapshots.insert(snapshot_key, bar_payload);
+    }
+
+    Ok(())
+}
+
+fn live_event_id(bar: &Bar) -> String {
+    format!(
+        "{}:live:{}:{}",
+        bar.bar_key, bar.identity.n_trades, bar.integrity.checksum
+    )
+}
+
 async fn process_bucket(
     db: Arc<QuestDb>,
     timeframe: &str,
@@ -414,6 +560,7 @@ async fn persist_event(db: Arc<QuestDb>, timeframe: &str, bar: &Bar, event_id: &
         symbol: &bar.symbol,
         timeframe: &bar.timeframe,
         revision: bar.revision,
+        is_final: true,
         data: bar,
     };
     let payload = serde_json::to_string(&event).context("Failed to encode bar event")?;
@@ -467,14 +614,42 @@ async fn send_event(
     namespace: &str,
     event: &PendingEvent,
 ) -> Result<()> {
-    let topic = bar_topic_name(namespace, &event.source, &event.symbol, &event.timeframe)?;
+    send_payload(
+        pulsar,
+        producers,
+        namespace,
+        &event.source,
+        &event.symbol,
+        &event.timeframe,
+        &event.event_id,
+        event.revision,
+        true,
+        event.pulsar_payload(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_payload(
+    pulsar: &Pulsar<TokioExecutor>,
+    producers: &mut BTreeMap<String, Producer<TokioExecutor>>,
+    namespace: &str,
+    source: &str,
+    symbol: &str,
+    timeframe: &str,
+    event_id: &str,
+    revision: u64,
+    is_final: bool,
+    payload: &str,
+) -> Result<()> {
+    let topic = bar_topic_name(namespace, source, symbol, timeframe)?;
     if !producers.contains_key(&topic) {
         let producer = pulsar
             .producer()
             .with_topic(topic.clone())
             .with_name(format!(
                 "microstructure-aggregator-{}-{}-{}",
-                event.source, event.symbol, event.timeframe
+                source, symbol, timeframe
             ))
             .build()
             .await
@@ -485,20 +660,32 @@ async fn send_event(
         .get_mut(&topic)
         .expect("the producer was inserted above");
     producer
-        .send_non_blocking(event.pulsar_payload().to_string())
+        .send_non_blocking(payload.to_string())
         .await
         .context("Failed to enqueue bar event in Pulsar")?
         .await
         .context("Pulsar did not acknowledge bar event")?;
-    info!(
-        event_id = %event.event_id,
-        source = %event.source,
-        symbol = %event.symbol,
-        timeframe = %event.timeframe,
-        topic = %topic,
-        revision = event.revision,
-        "Published persisted bar event"
-    );
+    if is_final {
+        info!(
+            event_id,
+            source,
+            symbol,
+            timeframe,
+            topic = %topic,
+            revision,
+            "Published finalized bar event"
+        );
+    } else {
+        debug!(
+            event_id,
+            source,
+            symbol,
+            timeframe,
+            topic = %topic,
+            revision,
+            "Published live bar event"
+        );
+    }
     Ok(())
 }
 
@@ -529,8 +716,9 @@ fn bar_topic_name(namespace: &str, source: &str, symbol: &str, timeframe: &str) 
 
 #[cfg(test)]
 mod tests {
-    use super::{bar_topic_name, questdb_connect_string};
+    use super::{bar_topic_name, live_event_id, questdb_connect_string};
     use crate::config::Config;
+    use crate::model::{Tick, build_bar_for_timeframe};
     use std::path::PathBuf;
 
     #[test]
@@ -546,6 +734,7 @@ mod tests {
             questdb_sf_max_segment_bytes: 32 * 1024 * 1024,
             id_registry_path: PathBuf::from("/tmp/aggregator-ids.json"),
             poll_interval_seconds: 60,
+            live_poll_interval_ms: 1_000,
             allowed_lateness_seconds: 5,
             reprocess_minutes: 5,
         };
@@ -574,5 +763,36 @@ mod tests {
         assert!(
             bar_topic_name("persistent://public/default", "binance", "BTC/USDT", "1m").is_err()
         );
+    }
+
+    #[test]
+    fn live_event_ids_are_distinct_from_final_revision_ids_and_change_with_snapshot() {
+        let first_ticks = [Tick {
+            time_us: 1_000_000,
+            source: "binance".to_string(),
+            symbol: "BTCUSDT".to_string(),
+            id: "1".to_string(),
+            price: 100,
+            qty: 1,
+            is_buyer_maker: 0,
+        }];
+        let second_ticks = [
+            first_ticks[0].clone(),
+            Tick {
+                time_us: 2_000_000,
+                source: "binance".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                id: "2".to_string(),
+                price: 101,
+                qty: 2,
+                is_buyer_maker: 1,
+            },
+        ];
+        let first = build_bar_for_timeframe(&first_ticks, 0, "1m", 60_000, 1, 1).unwrap();
+        let second = build_bar_for_timeframe(&second_ticks, 0, "1m", 60_000, 1, 1).unwrap();
+
+        assert_ne!(live_event_id(&first), format!("{}:r1", first.bar_key));
+        assert_ne!(live_event_id(&first), live_event_id(&second));
+        assert_eq!(live_event_id(&first), live_event_id(&first));
     }
 }

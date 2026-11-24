@@ -43,6 +43,7 @@ const isLoading = ref(false)
 const errorMessage = ref('')
 const socketStatus = ref<'connecting' | 'connected' | 'disconnected' | 'error'>('disconnected')
 const barCount = ref(0)
+const latestBarState = ref<'live' | 'final' | 'none'>('none')
 const canApply = computed(() => {
   return !isLoading.value && (
     draftSource.value !== source.value
@@ -108,6 +109,9 @@ function parseMarketBar(value: unknown): Bar | null {
 
   return {
     ...bar,
+    is_final: typeof value.is_final === 'boolean' ? value.is_final : true,
+    ...(typeof value.event_id === 'string' ? { event_id: value.event_id } : {}),
+    ...(typeof value.event_type === 'string' ? { event_type: value.event_type } : {}),
     // open-charts uses Unix timestamps in seconds for its time axis.
     time: timestamp / 1000,
     open,
@@ -146,7 +150,23 @@ function upsertBar(bar: Bar): boolean {
   }
 
   barCount.value = bars.size
+  updateLatestBarState()
   return bars.has(bar.time)
+}
+
+function updateLatestBarState() {
+  let latest: Bar | undefined
+  for (const bar of bars.values()) {
+    if (!latest || bar.time > latest.time) {
+      latest = bar
+    }
+  }
+
+  latestBarState.value = !latest
+    ? 'none'
+    : latest.is_final === false
+      ? 'live'
+      : 'final'
 }
 
 function replaceSeries() {
@@ -353,6 +373,7 @@ async function loadMarketData(
   seriesHydrated = false
   bars.clear()
   barCount.value = 0
+  latestBarState.value = 'none'
   stopWebSocket()
   replaceSeries()
   connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
@@ -522,7 +543,19 @@ onBeforeUnmount(() => {
 
     <div class="flex items-center justify-between text-xs text-muted">
       <span>{{ source }} · {{ symbol }} · {{ timeframe }}</span>
-      <span>{{ barCount }} / {{ HISTORY_LIMIT }} barras {{ timeframe }}</span>
+      <div class="flex items-center gap-3">
+        <span
+          v-if="latestBarState !== 'none'"
+          class="rounded-full border px-2 py-1"
+          :class="latestBarState === 'live'
+            ? 'border-warning/40 bg-warning/10 text-warning'
+            : 'border-default bg-elevated/50 text-muted'"
+          role="status"
+        >
+          {{ latestBarState === 'live' ? 'Bar en formación' : 'Última Bar cerrada' }}
+        </span>
+        <span>{{ barCount }} / {{ HISTORY_LIMIT }} barras {{ timeframe }}</span>
+      </div>
     </div>
 
     <div class="chart-view__surface relative overflow-hidden rounded-xl border border-default bg-elevated/30 sm:min-h-[520px]">

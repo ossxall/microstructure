@@ -55,6 +55,7 @@ pub struct BarEvent<'a> {
     pub timeframe: &'a str,
     #[serde(serialize_with = "decimal_string::serialize")]
     pub revision: u64,
+    pub is_final: bool,
     pub data: &'a Bar,
 }
 
