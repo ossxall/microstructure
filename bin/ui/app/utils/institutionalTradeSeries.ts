@@ -18,6 +18,13 @@ export interface InstitutionalTradeSeriesParams {
     max: number
     step: number
   }
+  markerGapPixels: {
+    value: number
+    affectsCompute: false
+    min: number
+    max: number
+    step: number
+  }
 }
 
 export interface InstitutionalTradeLevel {
@@ -255,6 +262,7 @@ function drawInstitutionalProfile(
   engine: ChartEngine,
   data: readonly Bar[],
   profile: InstitutionalTradeProfile,
+  markerGapPixels: number,
   priceMin: number,
   priceMax: number
 ): void {
@@ -272,18 +280,21 @@ function drawInstitutionalProfile(
     return
   }
 
-  const markerX = Math.min(
-    engine.chartW - 10,
-    lastBarX + Math.max(12, engine.barWidth * 1.8)
-  )
-  if (markerX <= lastBarX + 3) {
-    return
-  }
-
   const maxNotional = profile.levels.reduce((max, level) => {
     const total = level.buyNotional + level.sellNotional
     return total > max ? total : max
   }, ZERO)
+  const maxMarkerRadius = 10.5
+  const maxMarkerOuterRadius = maxMarkerRadius + 3
+  const candleHalfWidth = Math.max(1, Math.floor(engine.barWidth * 0.7) / 2)
+  const desiredMarkerX = lastBarX
+    + candleHalfWidth
+    + maxMarkerOuterRadius
+    + Math.max(0, markerGapPixels)
+  const markerX = Math.min(engine.chartW - maxMarkerOuterRadius - 1, desiredMarkerX)
+  if (markerX <= lastBarX + candleHalfWidth) {
+    return
+  }
 
   ctx.save()
   ctx.beginPath()
@@ -351,6 +362,13 @@ export function createInstitutionalTradeSeries(
       min: 50,
       max: 99.9,
       step: 0.1
+    },
+    markerGapPixels: {
+      value: 20,
+      affectsCompute: false,
+      min: 0,
+      max: 100,
+      step: 1
     }
   }
 
@@ -376,13 +394,22 @@ export function createInstitutionalTradeSeries(
       engine: ChartEngine,
       data: readonly Bar[],
       values: readonly InstitutionalTradeProfile[],
-      _options: InstitutionalTradeSeriesParams,
+      options: InstitutionalTradeSeriesParams,
       priceMin: number,
       priceMax: number
     ) {
       const profile = values[0]
       if (profile) {
-        drawInstitutionalProfile(ctx, pane, engine, data, profile, priceMin, priceMax)
+        drawInstitutionalProfile(
+          ctx,
+          pane,
+          engine,
+          data,
+          profile,
+          options.markerGapPixels.value,
+          priceMin,
+          priceMax
+        )
       }
     },
 

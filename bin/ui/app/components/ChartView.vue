@@ -27,7 +27,8 @@ interface HistoryResponse {
 
 const HISTORY_LIMIT = 50
 const DELTA_PROFILE_TIMEFRAME = '1m'
-const INSTITUTIONAL_HISTORY_LIMIT = 15
+const DEFAULT_INSTITUTIONAL_WINDOW_MINUTES = 5
+const MAX_INSTITUTIONAL_WINDOW_MINUTES = 60
 const HISTORY_REQUEST_TIMEOUT_MS = 25_000
 const sourceOptions: { label: string, value: MarketSource }[] = [
   { label: 'Binance', value: 'binance' },
@@ -71,7 +72,9 @@ const latestBarState = ref<'live' | 'final' | 'none'>('none')
 const profileSettings = reactive(deltaProfileDefaults())
 const institutionalTradeSettings = reactive({
   ...institutionalTradeDefaults(),
-  enabled: true
+  enabled: true,
+  markerGapPixels: 20,
+  rollingWindowMinutes: DEFAULT_INSTITUTIONAL_WINDOW_MINUTES
 })
 const profileWindowPreset = ref('15')
 const customProfileWindow = ref(15)
@@ -102,6 +105,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 let profileReconnectTimer: ReturnType<typeof setTimeout> | undefined
 let feedGeneration = 0
 let seriesHydrated = false
+let appliedInstitutionalWindowMinutes = DEFAULT_INSTITUTIONAL_WINDOW_MINUTES
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -224,7 +228,7 @@ function replaceSeries() {
   institutionalTradeSeries = chart.api.addSeries(createInstitutionalTradeSeries(
     () => [...institutionalTradeBars.values()].sort((left, right) => left.time - right.time)
   ))
-  applyInstitutionalTradeSettings()
+  applyInstitutionalTradeSettings(false)
 }
 
 function renderCurrentBars() {
@@ -331,7 +335,7 @@ function refreshInstitutionalTradeProfile() {
   })
 }
 
-function upsertInstitutionalTradeBar(bar: Bar): boolean {
+function upsertInstitutionalTradeBar(bar: Bar, refresh = true): boolean {
   if (!Array.isArray(bar.raw_ticks)) {
     return false
   }
@@ -348,15 +352,23 @@ function upsertInstitutionalTradeBar(bar: Bar): boolean {
   }
 
   institutionalTradeBars.set(bar.time, bar)
-  if (institutionalTradeBars.size > INSTITUTIONAL_HISTORY_LIMIT) {
-    const oldestTimes = [...institutionalTradeBars.keys()]
-      .sort((left, right) => left - right)
-      .slice(0, institutionalTradeBars.size - INSTITUTIONAL_HISTORY_LIMIT)
-    oldestTimes.forEach(time => institutionalTradeBars.delete(time))
+  pruneInstitutionalTradeBars()
+
+  if (refresh) {
+    refreshInstitutionalTradeProfile()
+  }
+  return true
+}
+
+function pruneInstitutionalTradeBars() {
+  if (institutionalTradeBars.size <= institutionalTradeSettings.rollingWindowMinutes) {
+    return
   }
 
-  refreshInstitutionalTradeProfile()
-  return true
+  const oldestTimes = [...institutionalTradeBars.keys()]
+    .sort((left, right) => left - right)
+    .slice(0, institutionalTradeBars.size - institutionalTradeSettings.rollingWindowMinutes)
+  oldestTimes.forEach(time => institutionalTradeBars.delete(time))
 }
 
 async function resyncInstitutionalTradeHistory(
@@ -370,7 +382,7 @@ async function resyncInstitutionalTradeHistory(
       nextSymbol,
       DELTA_PROFILE_TIMEFRAME,
       {
-        limit: INSTITUTIONAL_HISTORY_LIMIT,
+        limit: institutionalTradeSettings.rollingWindowMinutes,
         includeRawTicks: true
       }
     )
@@ -381,9 +393,10 @@ async function resyncInstitutionalTradeHistory(
 
     history.sort((left, right) => left.time - right.time)
     for (const bar of history) {
-      upsertInstitutionalTradeBar(bar)
+      upsertInstitutionalTradeBar(bar, false)
       deltaProfile.upsert(bar)
     }
+    refreshInstitutionalTradeProfile()
     refreshDeltaProfile()
   } catch (error) {
     if (generation === feedGeneration) {
@@ -683,8 +696,14 @@ async function loadMarketData(
       refreshDeltaProfile()
     }
     if (
-      nextTimeframe !== DELTA_PROFILE_TIMEFRAME
-      && profileSettings.rollingWindowMinutes > INSTITUTIONAL_HISTORY_LIMIT
+      (
+        nextTimeframe === DELTA_PROFILE_TIMEFRAME
+        && profileSettings.rollingWindowMinutes > HISTORY_LIMIT
+      )
+      || (
+        nextTimeframe !== DELTA_PROFILE_TIMEFRAME
+        && profileSettings.rollingWindowMinutes > institutionalTradeSettings.rollingWindowMinutes
+      )
     ) {
       void resyncDeltaProfileHistory(nextSource, nextSymbol, generation)
     }
@@ -696,8 +715,7 @@ async function loadMarketData(
         : 'No se pudo cargar el histórico'
       renderCurrentBars()
       if (
-        nextTimeframe !== DELTA_PROFILE_TIMEFRAME
-        || profileSettings.rollingWindowMinutes > HISTORY_LIMIT
+        profileSettings.rollingWindowMinutes > institutionalTradeSettings.rollingWindowMinutes
       ) {
         void resyncDeltaProfileHistory(
           nextSource,
@@ -756,8 +774,14 @@ function applyDeltaProfileSettings() {
   deltaProfileSeries?.setParams({ ...profileSettings })
   refreshDeltaProfile(true)
   if (
-    timeframe.value !== DELTA_PROFILE_TIMEFRAME
-    || profileSettings.rollingWindowMinutes > HISTORY_LIMIT
+    (
+      timeframe.value === DELTA_PROFILE_TIMEFRAME
+      && profileSettings.rollingWindowMinutes > HISTORY_LIMIT
+    )
+    || (
+      timeframe.value !== DELTA_PROFILE_TIMEFRAME
+      && profileSettings.rollingWindowMinutes > institutionalTradeSettings.rollingWindowMinutes
+    )
   ) {
     void resyncDeltaProfileHistory(
       source.value,
@@ -768,15 +792,34 @@ function applyDeltaProfileSettings() {
   }
 }
 
-function applyInstitutionalTradeSettings() {
+function applyInstitutionalTradeSettings(refreshHistory = true) {
   institutionalTradeSettings.topPercentile = Math.min(
     99.9,
     Math.max(50, Number(institutionalTradeSettings.topPercentile) || 99)
   )
+  institutionalTradeSettings.rollingWindowMinutes = Math.min(
+    MAX_INSTITUTIONAL_WINDOW_MINUTES,
+    Math.max(1, Math.round(
+      Number(institutionalTradeSettings.rollingWindowMinutes)
+      || DEFAULT_INSTITUTIONAL_WINDOW_MINUTES
+    ))
+  )
+  institutionalTradeSettings.markerGapPixels = Math.min(
+    100,
+    Math.max(0, Math.round(Number(institutionalTradeSettings.markerGapPixels) || 0))
+  )
+  const windowChanged = appliedInstitutionalWindowMinutes
+    !== institutionalTradeSettings.rollingWindowMinutes
+  appliedInstitutionalWindowMinutes = institutionalTradeSettings.rollingWindowMinutes
+  pruneInstitutionalTradeBars()
   institutionalTradeSeries?.setParams({
-    topPercentile: institutionalTradeSettings.topPercentile
+    topPercentile: institutionalTradeSettings.topPercentile,
+    markerGapPixels: institutionalTradeSettings.markerGapPixels
   })
   institutionalTradeSeries?.setVisible(institutionalTradeSettings.enabled)
+  if (refreshHistory && windowChanged) {
+    void resyncInstitutionalTradeHistory(source.value, symbol.value, feedGeneration)
+  }
 
   if (chart) {
     chart.dirty = true
@@ -1088,6 +1131,8 @@ onBeforeUnmount(() => {
           INSTITUTIONAL TRADE PROFILE
           <span class="ml-2 text-xs font-normal text-muted">
             P{{ institutionalTradeSettings.topPercentile }} ·
+            {{ institutionalTradeSettings.rollingWindowMinutes }}m ·
+            {{ institutionalTradeSettings.markerGapPixels }}px ·
             {{ institutionalTradeSettings.enabled ? 'visible' : 'oculto' }}
           </span>
         </summary>
@@ -1109,6 +1154,30 @@ onBeforeUnmount(() => {
               >
             </label>
 
+            <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
+              Ventana 1m (1–60 min)
+              <input
+                v-model.number="institutionalTradeSettings.rollingWindowMinutes"
+                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                type="number"
+                min="1"
+                max="60"
+                step="1"
+              >
+            </label>
+
+            <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
+              Separación vela (px)
+              <input
+                v-model.number="institutionalTradeSettings.markerGapPixels"
+                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                type="number"
+                min="0"
+                max="100"
+                step="1"
+              >
+            </label>
+
             <label class="flex items-center gap-2 pb-2 text-xs font-medium text-muted">
               <input
                 v-model="institutionalTradeSettings.enabled"
@@ -1127,7 +1196,9 @@ onBeforeUnmount(() => {
 
           <p class="text-xs text-muted">
             Filtra los trades de mayor notional en los raw_ticks cargados, los agrupa por precio y
-            colorea cada círculo según predominen BUY o SELL. P99 selecciona aproximadamente el 1% superior.
+            colorea cada círculo según predominen BUY o SELL. Usa las últimas
+            {{ institutionalTradeSettings.rollingWindowMinutes }} Bars 1m, incluida la live;
+            P99 selecciona aproximadamente el 1% superior.
           </p>
         </form>
       </details>

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { computeInstitutionalTradeProfile } from './institutionalTradeSeries.ts'
+import {
+  computeInstitutionalTradeProfile,
+  createInstitutionalTradeSeries
+} from './institutionalTradeSeries.ts'
 
 function makeBar(rawTicks, scales = { price_scale: 0, quantity_scale: 0 }) {
   return {
@@ -74,4 +77,12 @@ test('returns an empty profile when no valid, sided raw trades are available', (
   assert.equal(profile.selectedTradeCount, 0)
   assert.equal(profile.thresholdNotional, null)
   assert.deepEqual(profile.levels, [])
+})
+
+test('exposes a configurable foreground marker gap', () => {
+  const series = createInstitutionalTradeSeries(() => [])
+
+  assert.equal(series.layer, 'foreground')
+  assert.equal(series.params.markerGapPixels.value, 20)
+  assert.equal(series.params.markerGapPixels.affectsCompute, false)
 })
