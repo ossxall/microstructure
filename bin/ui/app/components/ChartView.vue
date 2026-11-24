@@ -27,7 +27,7 @@ interface HistoryResponse {
 
 const HISTORY_LIMIT = 50
 const DELTA_PROFILE_TIMEFRAME = '1m'
-const DEFAULT_INSTITUTIONAL_WINDOW_MINUTES = 5
+const DEFAULT_INSTITUTIONAL_WINDOW_MINUTES = 15
 const MAX_INSTITUTIONAL_WINDOW_MINUTES = 60
 const HISTORY_REQUEST_TIMEOUT_MS = 25_000
 const sourceOptions: { label: string, value: MarketSource }[] = [
