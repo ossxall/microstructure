@@ -1120,7 +1120,7 @@ onBeforeUnmount(() => {
               Actualizar ahora
             </button>
             <span class="text-xs text-muted">
-              Solo footprint de Bars 1m; la Bar live se excluye por defecto.
+              Solo footprint de Bars 1m; incluye la Bar live mientras está en formación.
             </span>
           </div>
         </form>
@@ -1195,8 +1195,9 @@ onBeforeUnmount(() => {
           </div>
 
           <p class="text-xs text-muted">
-            Filtra los trades de mayor notional en los raw_ticks cargados, los agrupa por precio y
-            colorea cada círculo según predominen BUY o SELL. Usa las últimas
+            Filtra los trades de mayor notional en los raw_ticks cargados y muestra una torta
+            BUY/SELL junto a la última vela; los porcentajes representan la cantidad de trades de
+            cada lado. Usa las últimas
             {{ institutionalTradeSettings.rollingWindowMinutes }} Bars 1m, incluida la live;
             P99 selecciona aproximadamente el 1% superior.
           </p>

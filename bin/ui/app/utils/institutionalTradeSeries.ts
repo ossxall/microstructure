@@ -102,15 +102,6 @@ function displayPrice(price: bigint, priceScale: number): number {
   return Number(price) / 10 ** priceScale
 }
 
-function ratio(numerator: bigint, denominator: bigint): number {
-  if (denominator <= ZERO || numerator <= ZERO) {
-    return 0
-  }
-
-  const precision = 1_000_000n
-  return Number((numerator * precision) / denominator) / Number(precision)
-}
-
 function formatNotional(
   value: bigint | null,
   priceScale: number,
@@ -129,6 +120,24 @@ function formatNotional(
     notation: 'compact',
     maximumFractionDigits: 1
   }).format(displayValue)
+}
+
+function getTradeSideCounts(profile: InstitutionalTradeProfile) {
+  return profile.levels.reduce(
+    (counts, level) => ({
+      buyCount: counts.buyCount + level.buyCount,
+      sellCount: counts.sellCount + level.sellCount
+    }),
+    { buyCount: 0, sellCount: 0 }
+  )
+}
+
+function formatTradePercentage(count: number, total: number): string {
+  if (total === 0) {
+    return '0%'
+  }
+
+  return `${((count / total) * 100).toFixed(1).replace(/\.0$/, '')}%`
 }
 
 /**
@@ -266,12 +275,13 @@ function drawInstitutionalProfile(
   priceMin: number,
   priceMax: number
 ): void {
-  if (profile.levels.length === 0 || pane.h < 40 || engine.chartW < 40) {
+  if (profile.selectedTradeCount === 0 || pane.h < 40 || engine.chartW < 40) {
     return
   }
 
   const lastIndex = data.length - 1
-  if (lastIndex < 0) {
+  const lastBar = data[lastIndex]
+  if (!lastBar) {
     return
   }
 
@@ -280,19 +290,30 @@ function drawInstitutionalProfile(
     return
   }
 
-  const maxNotional = profile.levels.reduce((max, level) => {
-    const total = level.buyNotional + level.sellNotional
-    return total > max ? total : max
-  }, ZERO)
-  const maxMarkerRadius = 10.5
-  const maxMarkerOuterRadius = maxMarkerRadius + 3
+  const { buyCount, sellCount } = getTradeSideCounts(profile)
+  const totalCount = buyCount + sellCount
+  if (totalCount === 0) {
+    return
+  }
+
+  const markerRadius = 18
+  const markerOuterRadius = markerRadius + 3
   const candleHalfWidth = Math.max(1, Math.floor(engine.barWidth * 0.7) / 2)
   const desiredMarkerX = lastBarX
     + candleHalfWidth
-    + maxMarkerOuterRadius
+    + markerOuterRadius
     + Math.max(0, markerGapPixels)
-  const markerX = Math.min(engine.chartW - maxMarkerOuterRadius - 1, desiredMarkerX)
+  const markerX = Math.min(engine.chartW - markerOuterRadius - 1, desiredMarkerX)
   if (markerX <= lastBarX + candleHalfWidth) {
+    return
+  }
+
+  if (lastBar.close < priceMin || lastBar.close > priceMax) {
+    return
+  }
+
+  const markerY = engine.utils.yOf(lastBar.close, pane, priceMin, priceMax)
+  if (!Number.isFinite(markerY) || markerY < 0 || markerY > pane.h) {
     return
   }
 
@@ -301,54 +322,37 @@ function drawInstitutionalProfile(
   ctx.rect(0, 0, engine.chartW, pane.h)
   ctx.clip()
 
-  for (const level of profile.levels) {
-    if (level.price < priceMin || level.price > priceMax) {
-      continue
-    }
+  const dominantColor = buyCount >= sellCount ? '#22c55e' : '#ef4444'
+  ctx.globalAlpha = 0.2
+  ctx.fillStyle = dominantColor
+  ctx.beginPath()
+  ctx.arc(markerX, markerY, markerRadius + 3, 0, Math.PI * 2)
+  ctx.fill()
 
-    const totalNotional = level.buyNotional + level.sellNotional
-    const strength = ratio(totalNotional, maxNotional)
-    const radius = 3.5 + Math.sqrt(strength) * 7
-    const buyIsDominant = level.buyCount > level.sellCount
-      || (
-        level.buyCount === level.sellCount
-        && level.buyNotional > level.sellNotional
-      )
-    const sellIsDominant = level.sellCount > level.buyCount
-      || (
-        level.buyCount === level.sellCount
-        && level.sellNotional > level.buyNotional
-      )
-    const color = buyIsDominant
-      ? '#22c55e'
-      : sellIsDominant
-        ? '#ef4444'
-        : '#cbd5e1'
-    const imbalance = totalNotional === ZERO
-      ? 0
-      : ratio(
-          level.buyNotional > level.sellNotional
-            ? level.buyNotional - level.sellNotional
-            : level.sellNotional - level.buyNotional,
-          totalNotional
-        )
-    const y = engine.utils.yOf(level.price, pane, priceMin, priceMax)
-
-    ctx.globalAlpha = 0.16 + imbalance * 0.12
+  ctx.globalAlpha = 1
+  const startAngle = -Math.PI / 2
+  const buyEndAngle = startAngle + (buyCount / totalCount) * Math.PI * 2
+  const drawSlice = (start: number, end: number, color: string) => {
     ctx.fillStyle = color
     ctx.beginPath()
-    ctx.arc(markerX, y, radius + 3, 0, Math.PI * 2)
+    ctx.moveTo(markerX, markerY)
+    ctx.arc(markerX, markerY, markerRadius, start, end)
+    ctx.closePath()
     ctx.fill()
-
-    ctx.globalAlpha = 0.72 + imbalance * 0.28
-    ctx.beginPath()
-    ctx.arc(markerX, y, radius, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)'
-    ctx.lineWidth = 1
-    ctx.stroke()
   }
 
+  if (buyCount > 0) {
+    drawSlice(startAngle, buyEndAngle, '#22c55e')
+  }
+  if (sellCount > 0) {
+    drawSlice(buyEndAngle, startAngle + Math.PI * 2, '#ef4444')
+  }
+
+  ctx.strokeStyle = 'rgba(15, 23, 42, 0.95)'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.arc(markerX, markerY, markerRadius, 0, Math.PI * 2)
+  ctx.stroke()
   ctx.restore()
 }
 
@@ -450,8 +454,8 @@ export function createInstitutionalTradeSeries(
         return []
       }
 
-      const buyCount = profile.levels.reduce((sum, level) => sum + level.buyCount, 0)
-      const sellCount = profile.levels.reduce((sum, level) => sum + level.sellCount, 0)
+      const { buyCount, sellCount } = getTradeSideCounts(profile)
+      const totalCount = buyCount + sellCount
       const buyNotional = profile.levels.reduce((sum, level) => sum + level.buyNotional, ZERO)
       const sellNotional = profile.levels.reduce((sum, level) => sum + level.sellNotional, ZERO)
       const dominantColor = buyCount > sellCount
@@ -469,6 +473,16 @@ export function createInstitutionalTradeSeries(
           label: `INST P${profile.topPercentile}`,
           value: `${profile.selectedTradeCount} trades`,
           color: dominantColor
+        },
+        {
+          label: 'BUY',
+          value: `${formatTradePercentage(buyCount, totalCount)} · ${buyCount}`,
+          color: '#22c55e'
+        },
+        {
+          label: 'SELL',
+          value: `${formatTradePercentage(sellCount, totalCount)} · ${sellCount}`,
+          color: '#ef4444'
         },
         {
           label: 'Umbral',

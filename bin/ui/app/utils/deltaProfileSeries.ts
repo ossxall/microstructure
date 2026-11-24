@@ -124,8 +124,8 @@ const DEFAULT_OPTIONS: DeltaProfileOptions = {
   showMaxNegativeDelta: true,
   showLabels: true,
   scaleMode: 'linear',
-  tickSize: '',
-  includeFormingBar: false,
+  tickSize: '50',
+  includeFormingBar: true,
   autoUpdate: true
 }
 

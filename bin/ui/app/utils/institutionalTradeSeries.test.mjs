@@ -86,3 +86,19 @@ test('exposes a configurable foreground marker gap', () => {
   assert.equal(series.params.markerGapPixels.value, 20)
   assert.equal(series.params.markerGapPixels.affectsCompute, false)
 })
+
+test('shows BUY and SELL trade percentages in the legend', () => {
+  const profile = computeInstitutionalTradeProfile([
+    makeBar([
+      { price: '100', qty: '1', is_buyer_maker: 0 },
+      { price: '100', qty: '1', is_buyer_maker: 0 },
+      { price: '100', qty: '1', is_buyer_maker: 0 },
+      { price: '100', qty: '1', is_buyer_maker: 1 }
+    ])
+  ], { topPercentile: 50 })
+  const series = createInstitutionalTradeSeries(() => [])
+  const legend = series.legend?.([], [profile], 0) ?? []
+
+  assert.equal(legend.find(row => row.label === 'BUY')?.value, '75% · 3')
+  assert.equal(legend.find(row => row.label === 'SELL')?.value, '25% · 1')
+})

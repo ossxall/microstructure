@@ -1,9 +1,19 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { RollingDeltaProfile } from './deltaProfileSeries.ts'
+import { deltaProfileDefaults, RollingDeltaProfile } from './deltaProfileSeries.ts'
 
 const BASE_TIME = Date.UTC(2026, 0, 1)
 const SCALE = 8
+
+function createProfile(options = {}, onDiagnostic) {
+  return new RollingDeltaProfile({ tickSize: '', ...options }, onDiagnostic)
+}
+
+test('defaults to a 50 price tick and includes the forming bar', () => {
+  const defaults = deltaProfileDefaults()
+  assert.equal(defaults.tickSize, '50')
+  assert.equal(defaults.includeFormingBar, true)
+})
 
 function makeLevel(price, buy, sell, buyCount = 1, sellCount = 1) {
   const total = buy + sell
@@ -127,7 +137,7 @@ function referenceBinanceBar() {
 }
 
 test('converts the Binance 1m reference scales and recomputes POC', () => {
-  const profile = new RollingDeltaProfile({ rollingWindowMinutes: 1 })
+  const profile = createProfile({ rollingWindowMinutes: 1 })
   assert.equal(profile.upsert(referenceBinanceBar()), true)
 
   const result = profile.snapshot()
@@ -145,7 +155,7 @@ test('converts the Binance 1m reference scales and recomputes POC', () => {
 
 for (const windowMinutes of [1, 5, 15, 60]) {
   test(`keeps only the last ${windowMinutes} minute bars`, () => {
-    const profile = new RollingDeltaProfile({ rollingWindowMinutes: windowMinutes })
+    const profile = createProfile({ rollingWindowMinutes: windowMinutes })
     for (let minute = 0; minute < 60; minute++) {
       profile.upsert(makeBar({
         minute,
@@ -163,7 +173,7 @@ for (const windowMinutes of [1, 5, 15, 60]) {
 }
 
 test('deduplicates repeated revisions and replaces the prior contribution', () => {
-  const profile = new RollingDeltaProfile({ rollingWindowMinutes: 5 })
+  const profile = createProfile({ rollingWindowMinutes: 5 })
   const first = makeBar({
     key: 'bar-a',
     levels: [makeLevel(10n, 100n, 0n)]
@@ -183,7 +193,7 @@ test('deduplicates repeated revisions and replaces the prior contribution', () =
 })
 
 test('accepts out-of-order bars and expires bars outside the rolling interval', () => {
-  const profile = new RollingDeltaProfile({ rollingWindowMinutes: 2 })
+  const profile = createProfile({ rollingWindowMinutes: 2 })
   const barAt = (minute, buy) => makeBar({
     minute,
     key: `bar-${minute}`,
@@ -197,8 +207,8 @@ test('accepts out-of-order bars and expires bars outside the rolling interval', 
   assert.equal(profile.snapshot().totalBuyVolume, 30n)
 })
 
-test('excludes an in-progress bar by default and includes its final revision', () => {
-  const profile = new RollingDeltaProfile({ rollingWindowMinutes: 3 })
+test('includes an in-progress bar by default and keeps its final revision', () => {
+  const profile = createProfile({ rollingWindowMinutes: 3 })
   const live = makeBar({
     key: 'live-bar',
     isFinal: false,
@@ -206,14 +216,15 @@ test('excludes an in-progress bar by default and includes its final revision', (
   })
 
   assert.equal(profile.upsert(live), true)
-  assert.equal(profile.snapshot().barsInWindow, 0)
-  assert.equal(profile.snapshot().totalVolume, 0n)
+  assert.equal(profile.snapshot().barsInWindow, 1)
+  assert.equal(profile.snapshot().totalVolume, 20n)
   assert.equal(profile.upsert({ ...live, revision: 2, is_final: true }), true)
+  assert.equal(profile.snapshot().barsInWindow, 1)
   assert.equal(profile.snapshot().totalVolume, 20n)
 })
 
 test('accepts a finalized bar with the same revision as its live snapshot', () => {
-  const profile = new RollingDeltaProfile({ rollingWindowMinutes: 3 })
+  const profile = createProfile({ rollingWindowMinutes: 3 })
   const live = makeBar({
     key: 'same-revision-live',
     isFinal: false,
@@ -227,7 +238,8 @@ test('accepts a finalized bar with the same revision as its live snapshot', () =
 
   assert.equal(live.revision, final.revision)
   assert.equal(profile.upsert(live), true)
-  assert.equal(profile.snapshot().barsInWindow, 0)
+  assert.equal(profile.snapshot().barsInWindow, 1)
+  assert.equal(profile.snapshot().totalVolume, 20n)
   assert.equal(profile.upsert(final), true)
   assert.equal(profile.snapshot().barsInWindow, 1)
   assert.equal(profile.snapshot().totalVolume, 40n)
@@ -236,7 +248,7 @@ test('accepts a finalized bar with the same revision as its live snapshot', () =
 })
 
 test('replaces changed live snapshots at the same revision without double counting', () => {
-  const profile = new RollingDeltaProfile({
+  const profile = createProfile({
     rollingWindowMinutes: 3,
     includeFormingBar: true
   })
@@ -267,7 +279,7 @@ test('replaces changed live snapshots at the same revision without double counti
 })
 
 test('aggregates repeated prices, drops zero levels, and accepts an empty footprint', () => {
-  const profile = new RollingDeltaProfile({ rollingWindowMinutes: 3 })
+  const profile = createProfile({ rollingWindowMinutes: 3 })
   const repeated = makeBar({
     key: 'repeated',
     levels: [
@@ -286,7 +298,7 @@ test('aggregates repeated prices, drops zero levels, and accepts an empty footpr
 
 test('allows unknown-side totals to exceed known-side footprint totals', () => {
   const diagnostics = []
-  const profile = new RollingDeltaProfile({}, message => diagnostics.push(message))
+  const profile = createProfile({}, message => diagnostics.push(message))
   const bar = makeBar({
     key: 'unknown-side',
     levels: [makeLevel(10n, 4n, 2n, 1, 1)]
@@ -307,7 +319,7 @@ test('allows unknown-side totals to exceed known-side footprint totals', () => {
 
 test('diagnoses inconsistent levels and rejects incompatible symbol and scales', () => {
   const diagnostics = []
-  const profile = new RollingDeltaProfile({}, message => diagnostics.push(message))
+  const profile = createProfile({}, message => diagnostics.push(message))
   const inconsistent = makeBar({
     key: 'bad-level',
     levels: [makeLevel(10n, 4n, 2n)]
@@ -333,10 +345,10 @@ test('incremental state matches a rebuild after late revisions and expiry', () =
     makeBar({ minute: 4, key: 'b4', levels: [makeLevel(11n, 6n, 0n)] }),
     makeBar({ minute: 2, key: 'b2', revision: 2, levels: [makeLevel(11n, 2n, 1n)] })
   ]
-  const incremental = new RollingDeltaProfile({ rollingWindowMinutes: 3 })
+  const incremental = createProfile({ rollingWindowMinutes: 3 })
   for (const bar of input) incremental.upsert(bar)
 
-  const rebuilt = new RollingDeltaProfile({ rollingWindowMinutes: 3 })
+  const rebuilt = createProfile({ rollingWindowMinutes: 3 })
   for (const bar of [input[3], input[4], input[5]]) rebuilt.upsert(bar)
 
   const current = incremental.snapshot()
@@ -353,7 +365,7 @@ test('incremental state matches a rebuild after late revisions and expiry', () =
 })
 
 test('groups prices by optional tick size without changing source quantities', () => {
-  const profile = new RollingDeltaProfile({
+  const profile = createProfile({
     rollingWindowMinutes: 1,
     tickSize: '0.01'
   })
@@ -368,7 +380,7 @@ test('groups prices by optional tick size without changing source quantities', (
 })
 
 test('uses lower-price POC ties and prefers the higher level on Value Area ties', () => {
-  const profile = new RollingDeltaProfile({ rollingWindowMinutes: 1, valueAreaPercentage: 70 })
+  const profile = createProfile({ rollingWindowMinutes: 1, valueAreaPercentage: 70 })
   profile.upsert(makeBar({
     levels: [
       makeLevel(9n, 4n, 0n),
