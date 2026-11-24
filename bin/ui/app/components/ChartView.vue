@@ -19,6 +19,11 @@ import {
   type DeltaBar,
   type DeltaMode
 } from '~/utils/deltaCandleSeries'
+import {
+  buildBidAskFlowSeries,
+  createBidAskFlowSeries,
+  type FlowCandleStyle
+} from '~/utils/bidAskFlowSeries'
 
 type MarketSource = 'binance' | 'dydx'
 type Timeframe = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d'
@@ -66,6 +71,7 @@ const rollingWindowOptions = [
 
 const chartHost = ref<HTMLElement | null>(null)
 const deltaChartHost = ref<HTMLElement | null>(null)
+const bidAskFlowChartHost = ref<HTMLElement | null>(null)
 const source = ref<MarketSource>('binance')
 const symbol = ref('BTCUSDT')
 const timeframe = ref<Timeframe>('1m')
@@ -90,6 +96,8 @@ const profileBarCount = ref(0)
 const profileDiagnostic = ref('')
 const deltaMode = ref<DeltaMode>('PER_BAR')
 const deltaCandleCount = ref(0)
+const flowCandleStyle = ref<FlowCandleStyle>('CANDLE')
+const bidAskFlowCandleCount = ref(0)
 const canApply = computed(() => {
   return !isLoading.value && (
     draftSource.value !== source.value
@@ -108,8 +116,10 @@ const deltaProfile = new RollingDeltaProfile(profileSettings, (message) => {
 })
 let chart: ChartEngine | undefined
 let deltaChart: ChartEngine | undefined
+let bidAskFlowChart: ChartEngine | undefined
 let series: AnyChartSeries | undefined
 let deltaCandleSeries: AnyChartSeries | undefined
+let bidAskFlowSeries: AnyChartSeries | undefined
 let deltaProfileSeries: AnyChartSeries | undefined
 let institutionalTradeSeries: AnyChartSeries | undefined
 let socket: WebSocket | undefined
@@ -280,12 +290,28 @@ function replaceDeltaCandleSeries() {
   deltaCandleCount.value = 0
 }
 
+function replaceBidAskFlowSeries() {
+  if (!bidAskFlowChart) {
+    return
+  }
+
+  bidAskFlowSeries?.destroy({ silent: true })
+  bidAskFlowSeries = bidAskFlowChart.api.addSeries(createBidAskFlowSeries())
+  bidAskFlowSeries.setParams({ style: flowCandleStyle.value })
+  bidAskFlowCandleCount.value = 0
+}
+
 function refreshDeltaCandleCount() {
   deltaCandleCount.value = [...deltaBars.values()]
     .reduce((count, bar) => {
       const candle = buildDeltaCandle(bar, 0, deltaMode.value)
       return candle ? count + 1 : count
     }, 0)
+}
+
+function refreshBidAskFlowCandleCount() {
+  const orderedBars = [...deltaBars.values()].sort((left, right) => left.time - right.time)
+  bidAskFlowCandleCount.value = buildBidAskFlowSeries(orderedBars).length
 }
 
 function upsertDeltaBar(bar: DeltaBar): boolean {
@@ -314,13 +340,19 @@ function upsertDeltaBar(bar: DeltaBar): boolean {
   oldestTimes.forEach(time => deltaBars.delete(time))
 
   deltaCandleSeries?.upsert(bar, { maxDataPoints: DELTA_HISTORY_LIMIT })
+  bidAskFlowSeries?.upsert(bar, { maxDataPoints: DELTA_HISTORY_LIMIT })
   refreshDeltaCandleCount()
+  refreshBidAskFlowCandleCount()
   return true
 }
 
 function applyDeltaMode() {
   deltaCandleSeries?.setParams({ mode: deltaMode.value })
   refreshDeltaCandleCount()
+}
+
+function applyFlowCandleStyle() {
+  bidAskFlowSeries?.setParams({ style: flowCandleStyle.value })
 }
 
 function renderCurrentBars() {
@@ -828,6 +860,7 @@ async function loadMarketData(
   institutionalTradeBars.clear()
   deltaBars.clear()
   deltaCandleCount.value = 0
+  bidAskFlowCandleCount.value = 0
   barCount.value = 0
   latestBarState.value = 'none'
   profileDiagnostic.value = ''
@@ -837,6 +870,7 @@ async function loadMarketData(
   stopDeltaProfileWebSocket()
   replaceSeries()
   replaceDeltaCandleSeries()
+  replaceBidAskFlowSeries()
   connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
   connectDeltaProfileWebSocket(nextSource, nextSymbol, generation)
   void resyncDeltaHistory(nextSource, nextSymbol, nextTimeframe, generation)
@@ -1014,6 +1048,10 @@ onMounted(() => {
     deltaChart = createChart(deltaChartHost.value)
     replaceDeltaCandleSeries()
   }
+  if (bidAskFlowChartHost.value) {
+    bidAskFlowChart = createChart(bidAskFlowChartHost.value)
+    replaceBidAskFlowSeries()
+  }
   void loadMarketData(source.value, symbol.value, timeframe.value)
 })
 
@@ -1023,10 +1061,13 @@ onBeforeUnmount(() => {
   stopDeltaProfileWebSocket()
   chart?.api.destroy()
   deltaChart?.api.destroy()
+  bidAskFlowChart?.api.destroy()
   chart = undefined
   deltaChart = undefined
+  bidAskFlowChart = undefined
   series = undefined
   deltaCandleSeries = undefined
+  bidAskFlowSeries = undefined
   deltaProfileSeries = undefined
   institutionalTradeSeries = undefined
 })
@@ -1474,6 +1515,52 @@ onBeforeUnmount(() => {
         />
         <div
           v-if="deltaCandleCount === 0"
+          class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
+          role="status"
+        >
+          Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
+        </div>
+      </div>
+    </section>
+
+    <section
+      class="flex flex-col gap-3"
+      aria-labelledby="bid-ask-flow-title"
+    >
+      <header class="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2
+            id="bid-ask-flow-title"
+            class="text-base font-semibold text-highlighted"
+          >
+            FLUJO BID/ASK ACUMULADO
+          </h2>
+          <p class="mt-1 text-xs text-muted">
+            Unidad qty · OHLC encadenado desde cero · solo raw_ticks · {{ bidAskFlowCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
+          </p>
+        </div>
+        <label class="flex flex-col gap-1 text-xs font-medium text-muted">
+          Estilo
+          <select
+            v-model="flowCandleStyle"
+            class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+            @change="applyFlowCandleStyle"
+          >
+            <option value="CANDLE">Velas</option>
+            <option value="OHLC_BAR">OHLC</option>
+          </select>
+        </label>
+      </header>
+
+      <div class="relative box-border h-[clamp(260px,35vh,380px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
+        <div
+          id="bid-ask-flow-chart"
+          ref="bidAskFlowChartHost"
+          class="h-full w-full"
+          aria-label="Gráfico OHLC de flujo bid/ask acumulado en cantidades"
+        />
+        <div
+          v-if="bidAskFlowCandleCount === 0"
           class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
           role="status"
         >

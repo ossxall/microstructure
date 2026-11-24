@@ -18,7 +18,8 @@
 }
 
 #ohlcv-chart,
-#delta-chart {
+#delta-chart,
+#bid-ask-flow-chart {
   position: relative;
   display: flex;
   width: 100%;
@@ -37,8 +38,13 @@
   min-height: 240px;
 }
 
+#bid-ask-flow-chart {
+  min-height: 240px;
+}
+
 #ohlcv-chart .pane,
-#delta-chart .pane {
+#delta-chart .pane,
+#bid-ask-flow-chart .pane {
   position: relative;
   min-height: 0;
   flex-shrink: 0;
@@ -46,18 +52,23 @@
 }
 
 #ohlcv-chart #pane-main,
-#delta-chart #pane-main {
+#delta-chart #pane-main,
+#bid-ask-flow-chart #pane-main {
   flex: 1 1 0;
 }
 
 #ohlcv-chart canvas.chart-canvas,
 #delta-chart canvas.chart-canvas,
+#bid-ask-flow-chart canvas.chart-canvas,
 #ohlcv-chart canvas.drawings-canvas,
 #delta-chart canvas.drawings-canvas,
+#bid-ask-flow-chart canvas.drawings-canvas,
 #ohlcv-chart canvas.pricescale-canvas,
 #delta-chart canvas.pricescale-canvas,
+#bid-ask-flow-chart canvas.pricescale-canvas,
 #ohlcv-chart canvas.overlay-canvas,
-#delta-chart canvas.overlay-canvas {
+#delta-chart canvas.overlay-canvas,
+#bid-ask-flow-chart canvas.overlay-canvas {
   position: absolute;
   top: 0;
   left: 0;
@@ -66,19 +77,23 @@
 
 #ohlcv-chart canvas.drawings-canvas,
 #delta-chart canvas.drawings-canvas,
+#bid-ask-flow-chart canvas.drawings-canvas,
 #ohlcv-chart canvas.overlay-canvas,
-#delta-chart canvas.overlay-canvas {
+#delta-chart canvas.overlay-canvas,
+#bid-ask-flow-chart canvas.overlay-canvas {
   pointer-events: none;
 }
 
 #ohlcv-chart canvas.pricescale-canvas,
-#delta-chart canvas.pricescale-canvas {
+#delta-chart canvas.pricescale-canvas,
+#bid-ask-flow-chart canvas.pricescale-canvas {
   right: 0;
   left: auto;
 }
 
 #ohlcv-chart #time-axis,
-#delta-chart #time-axis {
+#delta-chart #time-axis,
+#bid-ask-flow-chart #time-axis {
   position: relative;
   height: 24px;
   flex-shrink: 0;
@@ -87,27 +102,31 @@
 }
 
 #ohlcv-chart #time-axis canvas,
-#delta-chart #time-axis canvas {
+#delta-chart #time-axis canvas,
+#bid-ask-flow-chart #time-axis canvas {
   position: absolute;
   top: 0;
   left: 0;
 }
 
 #ohlcv-chart #scrollbar,
-#delta-chart #scrollbar {
+#delta-chart #scrollbar,
+#bid-ask-flow-chart #scrollbar {
   position: relative;
   height: 1px;
   flex-shrink: 0;
 }
 
 #ohlcv-chart #scrollthumb,
-#delta-chart #scrollthumb {
+#delta-chart #scrollthumb,
+#bid-ask-flow-chart #scrollthumb {
   position: absolute;
   height: 1px;
 }
 
 #ohlcv-chart #chart-legend,
-#delta-chart #chart-legend {
+#delta-chart #chart-legend,
+#bid-ask-flow-chart #chart-legend {
   position: absolute;
   z-index: 2;
   top: 8px;
@@ -118,7 +137,8 @@
 }
 
 #ohlcv-chart #chart-indicators,
-#delta-chart #chart-indicators {
+#delta-chart #chart-indicators,
+#bid-ask-flow-chart #chart-indicators {
   position: absolute;
   z-index: 2;
   top: 32px;
@@ -130,7 +150,8 @@
 }
 
 #ohlcv-chart .chart-indicators-item,
-#delta-chart .chart-indicators-item {
+#delta-chart .chart-indicators-item,
+#bid-ask-flow-chart .chart-indicators-item {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -138,9 +159,12 @@
 
 #ohlcv-chart .chart-indicators-item-settings,
 #delta-chart .chart-indicators-item-settings,
+#bid-ask-flow-chart .chart-indicators-item-settings,
 #ohlcv-chart .chart-indicators-item-delete,
 #delta-chart .chart-indicators-item-delete,
+#bid-ask-flow-chart .chart-indicators-item-delete,
 #ohlcv-chart .chart-overlay-ui,
-#delta-chart .chart-overlay-ui {
+#delta-chart .chart-overlay-ui,
+#bid-ask-flow-chart .chart-overlay-ui {
   display: none;
 }
