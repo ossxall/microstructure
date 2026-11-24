@@ -76,6 +76,8 @@ impl Tick {
         ensure!(!self.source.is_empty(), "tick source cannot be empty");
         ensure!(!self.symbol.is_empty(), "tick symbol cannot be empty");
         ensure!(!self.id.is_empty(), "tick id cannot be empty");
+        ensure!(self.price > 0, "tick price must be positive");
+        ensure!(self.qty > 0, "tick quantity must be positive");
         Ok(())
     }
 }
@@ -1287,6 +1289,96 @@ mod tests {
         assert_eq!(bar.raw_ticks.len(), 3);
         assert_eq!(bar.raw_ticks[2].id, "8322178462");
         assert_eq!(bar.identity.sequence_contiguous, 1);
+    }
+
+    #[test]
+    fn bar_metrics_obey_aggregation_invariants() {
+        let ticks = [
+            tick(1_000, "1", 100, 7, 0),
+            tick(2_000, "2", 102, 5, 1),
+            tick(3_000, "3", 101, 3, 2),
+            tick(4_000, "4", 104, 9, 0),
+        ];
+        let bar = build_bar(&ticks, 0, 1, 1).unwrap();
+
+        let raw_qty: u128 = ticks.iter().map(|tick| u128::from(tick.qty)).sum();
+        let raw_notional: u128 = ticks
+            .iter()
+            .map(|tick| u128::from(tick.price) * u128::from(tick.qty))
+            .sum();
+        let unknown_side_qty: u128 = ticks
+            .iter()
+            .filter(|tick| tick.is_buyer_maker > 1)
+            .map(|tick| u128::from(tick.qty))
+            .sum();
+        let known_side_qty: u128 = bar
+            .footprint
+            .levels
+            .iter()
+            .map(|level| level.total_qty)
+            .sum();
+        let value_area_qty: u128 = bar
+            .footprint
+            .levels
+            .iter()
+            .filter(|level| {
+                level.price >= bar.footprint.value_area_low
+                    && level.price <= bar.footprint.value_area_high
+            })
+            .map(|level| level.total_qty)
+            .sum();
+
+        assert_eq!(bar.volume_flow.total_qty, raw_qty);
+        assert_eq!(bar.volume_flow.total_qty, known_side_qty + unknown_side_qty);
+        assert_eq!(bar.volume_flow.total_notional, raw_notional);
+        assert!(bar.volume_flow.vwap >= bar.price.low as u128);
+        assert!(bar.volume_flow.vwap <= bar.price.high as u128);
+        assert_eq!(
+            i128::from(bar.price.close) - i128::from(bar.price.open),
+            bar.price_changes.change_sum
+        );
+        assert_eq!(
+            bar.distributions
+                .trade_size_hist
+                .iter()
+                .map(|count| u128::from(*count))
+                .sum::<u128>(),
+            u128::from(bar.identity.n_trades)
+        );
+        assert_eq!(
+            bar.distributions
+                .price_change_hist
+                .iter()
+                .map(|count| u128::from(*count))
+                .sum::<u128>(),
+            u128::from(bar.price_changes.change_count)
+        );
+        assert_eq!(
+            bar.distributions
+                .interarrival_hist
+                .iter()
+                .map(|count| u128::from(*count))
+                .sum::<u128>(),
+            u128::from(bar.timing.interarrival_count)
+        );
+        assert_eq!(
+            bar.distributions
+                .price_volume_hist
+                .iter()
+                .map(|qty| u128::from(*qty))
+                .sum::<u128>(),
+            raw_qty
+        );
+        assert!(
+            value_area_qty
+                >= known_side_qty * 70_u128 / 100 + u128::from(known_side_qty * 70_u128 % 100 != 0)
+        );
+    }
+
+    #[test]
+    fn rejects_zero_price_or_quantity() {
+        assert!(build_bar(&[tick(1_000, "1", 0, 1, 0)], 0, 1, 1).is_err());
+        assert!(build_bar(&[tick(1_000, "1", 100, 0, 0)], 0, 1, 1).is_err());
     }
 
     #[test]

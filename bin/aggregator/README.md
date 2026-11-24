@@ -91,7 +91,17 @@ product. `is_buyer_maker=0` contributes to buy flow and `=1` to sell flow;
 other values remain in `raw_ticks` and contribute to total flow, but are
 excluded from side-specific totals. Price changes and their moments/histogram
 are integer price changes, not percentage returns. Inter-arrival times are
-microseconds.
+represented in microseconds, but the configured exchange sources expose event
+timestamps at millisecond precision; their effective inter-arrival resolution
+is therefore 1,000 microseconds, and same-millisecond trades can have zero
+inter-arrival.
+
+Ingestion accepts only positive price/quantity values that can be represented
+exactly at the fixed `10^8` scale. Decimal input with more than eight fractional
+places is accepted only when the extra places are zero; values that would need
+rounding are logged and ignored. The merger and aggregator validate positive
+price and quantity again. Existing invalid rows in QuestDB make bar generation
+fail explicitly instead of silently affecting OHLC or volume.
 
 The footprint uses observed price levels, a 70% volume value area, and a 3:1
 buy/sell imbalance threshold. The value-area target uses known-side quantity;
@@ -100,6 +110,12 @@ target. The histogram fields have 16 equal-width bins;
 each histogram also includes its minimum and maximum so its bins can be
 interpreted. See `logic.md` for formulas, flag assignments, and the exact
 checksum byte encoding.
+
+`realized_variance` and `bipower_variation` currently aggregate absolute price
+changes, not returns, and the latter omits the conventional `π/2` factor. The
+absorption, exhaustion, and unfinished-auction fields are implementation
+heuristics, not independently validated market signals. See `logic.md` before
+using these fields as standardized financial measures.
 
 In schema version 4, every signed or unsigned 64-bit and 128-bit integer is
 serialized as an exact base-10 JSON string (including histogram arrays). This

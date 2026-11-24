@@ -1,10 +1,7 @@
-use crate::models::Tick;
+use crate::models::{Tick, decimal_to_scaled_u64};
 use anyhow::Result;
-use rust_decimal::Decimal;
 use serde::Deserialize;
 use tracing::warn;
-
-static FACTOR: Decimal = Decimal::from_parts(100_000_000, 0, 0, false, 0);
 
 /**
 Binance wsconection logs example:
@@ -58,12 +55,6 @@ struct BinanceTrade {
     is_buyer_maker: bool,
 }
 
-fn decimal_to_u64(value: &str) -> anyhow::Result<u64> {
-    let decimal: Decimal = value.parse()?;
-
-    Ok((decimal * FACTOR).round().try_into()?)
-}
-
 /// Parses Binance Futures @trade messages into Tick.
 ///
 /// Subscription ACKs and other non-trade messages return an empty vector.
@@ -82,10 +73,20 @@ pub fn parse_binance_trade(text: &str) -> Result<Vec<Tick>> {
 
     let trade: BinanceTrade = serde_json::from_value(value)?;
 
-    if trade.price == "0" || trade.qty == "0" {
-        warn!("Ignoring invalid trade: {}", text);
-        return Ok(Vec::new());
-    }
+    let price = match decimal_to_scaled_u64(&trade.price) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(%error, "Ignoring Binance trade with invalid price or precision");
+            return Ok(Vec::new());
+        }
+    };
+    let qty = match decimal_to_scaled_u64(&trade.qty) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(%error, "Ignoring Binance trade with invalid quantity or precision");
+            return Ok(Vec::new());
+        }
+    };
 
     Ok(vec![Tick {
         source: "binance".to_string(),
@@ -96,10 +97,33 @@ pub fn parse_binance_trade(text: &str) -> Result<Vec<Tick>> {
 
         time: trade.trade_time,
 
-        price: decimal_to_u64(&trade.price)?,
+        price,
 
-        qty: decimal_to_u64(&trade.qty)?,
+        qty,
 
         is_buyer_maker: trade.is_buyer_maker as u8,
     }])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_binance_trade;
+
+    #[test]
+    fn parses_exactly_scaled_trade_and_skips_precision_loss() {
+        let valid =
+            r#"{"e":"trade","T":1000,"s":"BTCUSDT","t":1,"p":"60900.70","q":"0.001","m":false}"#;
+        let ticks = parse_binance_trade(valid).unwrap();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].price, 6_090_070_000_000);
+        assert_eq!(ticks[0].qty, 100_000);
+
+        let too_precise =
+            r#"{"e":"trade","T":1000,"s":"BTCUSDT","t":2,"p":"1.000000001","q":"1","m":false}"#;
+        assert!(parse_binance_trade(too_precise).unwrap().is_empty());
+
+        let zero_quantity =
+            r#"{"e":"trade","T":1000,"s":"BTCUSDT","t":3,"p":"1","q":"0.00000000","m":false}"#;
+        assert!(parse_binance_trade(zero_quantity).unwrap().is_empty());
+    }
 }

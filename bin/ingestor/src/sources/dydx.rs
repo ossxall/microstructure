@@ -13,13 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::models::Tick;
+use crate::models::{Tick, decimal_to_scaled_u64};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use serde::Deserialize;
-
-static FACTOR: Decimal = Decimal::from_parts(100_000_000, 0, 0, false, 0);
+use tracing::warn;
 
 #[derive(Debug, Deserialize)]
 struct MessageType {
@@ -73,12 +71,6 @@ struct DydxWsMessage {
     contents: DydxContents,
 }
 
-fn decimal_to_u64(value: &str) -> anyhow::Result<u64> {
-    let decimal: Decimal = value.parse()?;
-
-    Ok((decimal * FACTOR).round().try_into()?)
-}
-
 #[inline]
 fn side_to_u8(side: &str) -> u8 {
     match side {
@@ -103,6 +95,16 @@ pub fn parse_dydx_trade(text: &str) -> Result<Vec<Tick>> {
             let mut ticks: Vec<Tick> = Vec::with_capacity(message.contents.trades.len());
 
             for trade in message.contents.trades {
+                let scaled_values = decimal_to_scaled_u64(&trade.price)
+                    .and_then(|price| decimal_to_scaled_u64(&trade.size).map(|qty| (price, qty)));
+                let (price, qty) = match scaled_values {
+                    Ok(values) => values,
+                    Err(error) => {
+                        warn!(%error, trade_id = %trade.id, "Ignoring dYdX trade with invalid price, size, or precision");
+                        continue;
+                    }
+                };
+
                 let tick: Tick = Tick {
                     source: "dydx".to_string(),
 
@@ -112,9 +114,9 @@ pub fn parse_dydx_trade(text: &str) -> Result<Vec<Tick>> {
 
                     time: trade.created_at.timestamp_millis() as u64,
 
-                    price: decimal_to_u64(&trade.price)?,
+                    price,
 
-                    qty: decimal_to_u64(&trade.size)?,
+                    qty,
 
                     is_buyer_maker: side_to_u8(&trade.side),
                 };
@@ -144,5 +146,27 @@ pub fn parse_dydx_trade(text: &str) -> Result<Vec<Tick>> {
             println!("Unknown message type: {other}");
             return Ok(Vec::new());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dydx_trade;
+
+    #[test]
+    fn skips_invalid_trade_in_batch_without_losing_valid_trades() {
+        let message = r#"{
+            "type":"channel_data",
+            "id":"BTC-USD",
+            "contents":{"trades":[
+                {"id":"trade-1","side":"BUY","size":"0.0985","price":"64100","createdAt":"2026-07-24T21:47:35.074Z"},
+                {"id":"trade-2","side":"SELL","size":"0.000000001","price":"64100","createdAt":"2026-07-24T21:47:35.075Z"}
+            ]}
+        }"#;
+
+        let ticks = parse_dydx_trade(message).unwrap();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].id, "trade-1");
+        assert_eq!(ticks[0].qty, 9_850_000);
     }
 }

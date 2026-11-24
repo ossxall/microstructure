@@ -108,8 +108,10 @@ evento, bajar el intervalo aumenta el tráfico y el coste de reconsulta.
 ## Construcción de una barra
 
 `build_bar_for_timeframe` exige al menos un tick, una duración positiva, source
-y symbol no vacíos y consistentes, timestamps no negativos y todos los ticks
-dentro de la misma ventana. Ordena por `time_us`; para timestamps iguales ordena
+y symbol no vacíos y consistentes, timestamps no negativos, precio/cantidad
+positivos y todos los ticks dentro de la misma ventana. Un tick inválido rechaza
+la construcción de la barra; no se incorpora silenciosamente como una operación
+válida. Ordena por `time_us`; para timestamps iguales ordena
 IDs numéricos por valor (y luego por texto original), antes que IDs no numéricos,
 que se ordenan lexicográficamente.
 
@@ -120,6 +122,10 @@ y checksum. Los ticks originales ordenados se conservan en `raw_ticks` para
 auditoría. Los precios y cantidades de entrada son enteros escalados por `10^8`;
 el notional es su producto entero. El cálculo usa operaciones comprobadas para
 detectar desbordamientos y enteros grandes cuando los momentos exceden 128 bits.
+La ingestión convierte decimales a esa escala sin redondear: acepta más de ocho
+posiciones decimales solo si las posiciones adicionales son ceros; los valores
+no positivos o que requieran redondeo se descartan y registran en el log. El
+merger y el agregador vuelven a validar precio y cantidad positivos.
 
 ## Tick de entrada
 
@@ -335,7 +341,10 @@ Bar
   `raw_ticks[].time` y los timestamps de barra/evento son milisegundos Unix UTC.
   `raw_ticks[].time` trunca a milisegundos el timestamp de entrada; `time_us`
   conserva los microsegundos exactos y se usa en el checksum. Se rechazan
-  timestamps negativos. Los interarribos se expresan en microsegundos.
+  timestamps negativos. Los interarribos se expresan en microsegundos; las
+  fuentes visibles entregan timestamps de evento en milisegundos, por lo que
+  sus intervalos tienen resolución efectiva de 1.000 μs y trades en el mismo
+  milisegundo pueden producir intervalos cero.
 - `first_trade_id_raw` y `last_trade_id_raw` son los IDs originales
   autoritativos. `first_trade_id`/`last_trade_id` contienen el `u64` parseado si
   es posible; en caso contrario, contienen FNV-1a de 64 bits de los bytes UTF-8
@@ -399,10 +408,15 @@ Bar
   cantidades por bin.
 - `positive_change_magnitude` y `negative_change_magnitude` suman por separado
   las magnitudes absolutas de los cambios positivos y negativos. No son los
-  componentes de `realized_variance`, que suma los cambios al cuadrado. Los
-  momentos de orden alto se guardan como cadenas decimales exactas porque pueden
-  superar 128 bits; en v4, los demás enteros anchos también se serializan como
-  cadenas para evitar pérdida de precisión.
+  componentes de `realized_variance`, que suma los cambios al cuadrado.
+  `change_sum_sq` y `realized_variance` son `Σ Δp²`, donde `Δp` son diferencias
+  de precio entre trades: no son la varianza realizada financiera convencional
+  basada en retornos, ni son comparables directamente entre instrumentos con
+  escalas de precio distintas. `bipower_variation` es
+  `Σ |Δpᵢ||Δpᵢ₋₁|`, sin el factor `π/2`; tampoco es la medida convencional basada
+  en retornos. Los momentos de orden alto se guardan como cadenas decimales
+  exactas porque pueden superar 128 bits; en v4, los demás enteros anchos
+  también se serializan como cadenas para evitar pérdida de precisión.
 - `trade_imbalance`, `volume_imbalance` y `notional_imbalance` son diferencias
   con signo compra menos venta para conteo, cantidad y notional; no son valores
   absolutos. `vwap = total_notional / total_qty`; `mean_size` y
@@ -412,14 +426,15 @@ Bar
   nulos; los cambios cero no reinician la dirección no nula anterior.
   `max_positive_delta` es al menos cero y `max_negative_delta` como máximo cero,
   porque ambos extremos se inicializan en cero.
-- `bipower_variation` es la suma sin escalar
-  `Σ |change[i]| * |change[i-1]|`; no incluye el factor convencional `π/2`.
-  `absorption_buy` es la cantidad compradora conocida total si `close <= open`;
+- `absorption_buy` es la cantidad compradora conocida total si `close <= open`;
   `absorption_sell`, la cantidad vendedora conocida total si `close >= open`.
   `exhaustion_buy` es la cantidad compradora en el precio máximo si
   `close <= open`; `exhaustion_sell`, la cantidad vendedora en el precio mínimo
-  si `close >= open`. Son heurísticas de implementación, no señales de mercado
-  validadas independientemente.
+  si `close >= open`. También `unfinished_auction_high/low` son predicados
+  basados en ausencia de volumen de un lado en el extremo. Son heurísticas de
+  implementación, no convenciones universales ni señales de mercado validadas
+  independientemente; por ejemplo, una barra doji activa ambas condiciones de
+  absorción.
 - En `header.flags`, el bit 0 indica que hay al menos un flag de cobertura. El
   bit 1 está siempre activo por ahora y reservado; los consumidores no deben
   asignarle otro significado. Los bits de `coverage_flags` son: 0, hora de
@@ -461,3 +476,8 @@ Bar
   ni conteos de ticks rechazados/descartados. Los campos numéricos de esos datos
   no disponibles valen cero; `coverage_flags`/`quality_flags` señalan la falta
   de cobertura.
+- `invalid_trade_count` no representa descartes hechos por el ingestor: estos se
+  registran en sus logs y no llegan a la tabla `ticks`. Una barra exitosa solo
+  contiene ticks válidos; si ya existe en QuestDB un tick de precio/cantidad
+  cero, el agregador falla explícitamente y se debe corregir ese dato antes de
+  reintentar.

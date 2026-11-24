@@ -50,6 +50,8 @@ impl Tick {
         ensure!(!self.source.is_empty(), "tick source cannot be empty");
         ensure!(!self.symbol.is_empty(), "tick symbol cannot be empty");
         ensure!(!self.id.is_empty(), "tick id cannot be empty");
+        ensure!(self.price > 0, "tick price must be positive");
+        ensure!(self.qty > 0, "tick quantity must be positive");
         i64::try_from(self.price).context("tick price exceeds QuestDB LONG range")?;
         i64::try_from(self.qty).context("tick quantity exceeds QuestDB LONG range")?;
 
@@ -114,6 +116,26 @@ mod tests {
             is_buyer_maker: 0,
         };
 
+        assert!(tick.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_price_or_quantity() {
+        let mut tick = Tick {
+            source: "binance".to_string(),
+            symbol: "BTCUSDT".to_string(),
+            id: "42".to_string(),
+            time: 1,
+            price: 1,
+            qty: 1,
+            is_buyer_maker: 0,
+        };
+
+        tick.price = 0;
+        assert!(tick.validate().is_err());
+
+        tick.price = 1;
+        tick.qty = 0;
         assert!(tick.validate().is_err());
     }
 }
