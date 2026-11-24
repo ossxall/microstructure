@@ -1298,7 +1298,6 @@ onBeforeUnmount(() => {
       </details>
 
       <details
-        open
         class="rounded-xl border border-default bg-elevated/20 p-3"
       >
         <summary class="cursor-pointer text-sm font-semibold text-highlighted">
