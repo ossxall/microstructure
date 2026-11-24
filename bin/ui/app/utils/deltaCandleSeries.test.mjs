@@ -68,6 +68,43 @@ test('CVD carries the prior close while PER_BAR resets each candle to zero', () 
   ])
 })
 
+test('CVD full rebuilds and incremental updates preserve the retained-window base', () => {
+  const bars = [
+    makeBar([{ qty: '200', is_buyer_maker: 0, time: 1 }], { time: 1 }),
+    makeBar([{ qty: '100', is_buyer_maker: 1, time: 2 }], { time: 2 })
+  ]
+  const baseClose = 7
+  const expected = buildDeltaSeries(bars, 'CVD', baseClose)
+  assert.deepEqual(expected.map(candle => [candle.open, candle.close]), [
+    [7, 9],
+    [9, 8]
+  ])
+
+  const series = createDeltaCandleSeries()
+  series.params.mode.value = 'CVD'
+  series.params.baseClose.value = baseClose
+  let values = series.compute(bars, series.params)
+  assert.deepEqual(values, expected)
+
+  const revisedBars = [
+    makeBar([{ qty: '300', is_buyer_maker: 0, time: 1 }], { time: 1 }),
+    bars[1]
+  ]
+  values = series.compute(revisedBars, series.params)
+  assert.deepEqual(values, buildDeltaSeries(revisedBars, 'CVD', baseClose))
+
+  const appended = makeBar(
+    [{ qty: '100', is_buyer_maker: 0, time: 3 }],
+    { time: 3 }
+  )
+  revisedBars.push(appended)
+  series.updateIncremental(revisedBars, values, true, series.params)
+  assert.deepEqual(
+    values,
+    buildDeltaSeries(revisedBars, 'CVD', baseClose)
+  )
+})
+
 test('skips empty or invalid raw tick bars and defaults the chart to PER_BAR', () => {
   assert.equal(buildDeltaCandle(makeBar([])), null)
   assert.equal(buildDeltaCandle(makeBar([
@@ -77,4 +114,6 @@ test('skips empty or invalid raw tick bars and defaults the chart to PER_BAR', (
   const series = createDeltaCandleSeries()
   assert.equal(series.params.mode.value, 'PER_BAR')
   assert.equal(series.params.mode.affectsCompute, true)
+  assert.equal(series.params.baseClose.value, 0)
+  assert.equal(series.params.baseClose.affectsCompute, true)
 })

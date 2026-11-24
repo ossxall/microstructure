@@ -108,6 +108,7 @@ const canApply = computed(() => {
 const config = useRuntimeConfig()
 const bars = new Map<number, Bar>()
 const deltaBars = new Map<number, DeltaBar>()
+let deltaCvdBase = 0
 const deltaProfile = new RollingDeltaProfile(profileSettings, (message) => {
   profileDiagnostic.value = message
   console.warn(message)
@@ -332,7 +333,10 @@ function replaceDeltaCandleSeries() {
 
   deltaCandleSeries?.destroy({ silent: true })
   deltaCandleSeries = deltaChart.api.addSeries(createDeltaCandleSeries())
-  deltaCandleSeries.setParams({ mode: deltaMode.value })
+  deltaCandleSeries.setParams({
+    mode: deltaMode.value,
+    baseClose: deltaCvdBase
+  })
   deltaCandleCount.value = 0
 }
 
@@ -366,6 +370,15 @@ function upsertDeltaBar(bar: DeltaBar): boolean {
   }
 
   const current = deltaBars.get(bar.time)
+  const oldestTime = Math.min(...deltaBars.keys())
+  if (
+    !current
+    && deltaBars.size >= DELTA_HISTORY_LIMIT
+    && bar.time < oldestTime
+  ) {
+    return false
+  }
+
   if (
     current
     && (
@@ -379,13 +392,28 @@ function upsertDeltaBar(bar: DeltaBar): boolean {
     return false
   }
 
+  const existingTimes = new Set(deltaBars.keys())
   deltaBars.set(bar.time, bar)
   const oldestTimes = [...deltaBars.keys()]
     .sort((left, right) => left - right)
     .slice(0, Math.max(0, deltaBars.size - DELTA_HISTORY_LIMIT))
-  oldestTimes.forEach(time => deltaBars.delete(time))
+  let baseChanged = false
+  oldestTimes.forEach((time) => {
+    const removedBar = deltaBars.get(time)
+    if (removedBar && existingTimes.has(time)) {
+      const removedCandle = buildDeltaCandle(removedBar)
+      if (removedCandle) {
+        deltaCvdBase += removedCandle.close - removedCandle.open
+        baseChanged = true
+      }
+    }
+    deltaBars.delete(time)
+  })
 
   deltaCandleSeries?.upsert(bar, { maxDataPoints: DELTA_HISTORY_LIMIT })
+  if (baseChanged) {
+    deltaCandleSeries?.setParams({ baseClose: deltaCvdBase })
+  }
   bidAskFlowSeries?.upsert(bar, { maxDataPoints: DELTA_HISTORY_LIMIT })
   refreshDeltaCandleCount()
   refreshBidAskFlowCandleCount()
@@ -826,6 +854,7 @@ async function loadMarketData(
   seriesHydrated = false
   bars.clear()
   deltaBars.clear()
+  deltaCvdBase = 0
   deltaCandleCount.value = 0
   bidAskFlowCandleCount.value = 0
   barCount.value = 0

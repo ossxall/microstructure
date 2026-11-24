@@ -39,6 +39,10 @@ interface DeltaParams {
     value: DeltaMode
     affectsCompute: true
   }
+  baseClose: {
+    value: number
+    affectsCompute: true
+  }
 }
 
 function numeric(value: unknown): number {
@@ -98,7 +102,7 @@ export function buildDeltaCandle(
   }
 
   const divisor = 10 ** quantityScale
-  const start = mode === 'CVD' ? prevClose : 0
+  const start = mode === 'CVD' && Number.isFinite(prevClose) ? prevClose : 0
   let running = start
   let high = start
   let low = start
@@ -128,6 +132,14 @@ export function buildDeltaCandle(
       bidQty += -signedQty
     }
 
+    if (
+      !Number.isFinite(running)
+      || !Number.isFinite(askQty)
+      || !Number.isFinite(bidQty)
+    ) {
+      return null
+    }
+
     high = Math.max(high, running)
     low = Math.min(low, running)
   }
@@ -149,10 +161,11 @@ export function buildDeltaCandle(
 
 export function buildDeltaSeries(
   bars: readonly DeltaBar[],
-  mode: DeltaMode = 'PER_BAR'
+  mode: DeltaMode = 'PER_BAR',
+  baseClose = 0
 ): DeltaCandle[] {
   const candles: DeltaCandle[] = []
-  let prevClose = 0
+  let prevClose = Number.isFinite(baseClose) ? baseClose : 0
 
   for (const bar of bars) {
     const candle = buildDeltaCandle(bar, prevClose, mode)
@@ -173,14 +186,17 @@ function formatQuantity(value: number): string {
   }).format(value)
 }
 
-function previousClose(values: readonly (DeltaCandle | null)[]): number {
+function previousClose(
+  values: readonly (DeltaCandle | null)[],
+  fallback = 0
+): number {
   for (let index = values.length - 1; index >= 0; index--) {
     const candle = values[index]
-    if (candle) {
+    if (candle && Number.isFinite(candle.close)) {
       return candle.close
     }
   }
-  return 0
+  return Number.isFinite(fallback) ? fallback : 0
 }
 
 function rangeForCandles(candles: readonly (DeltaCandle | null)[]) {
@@ -223,6 +239,10 @@ export function createDeltaCandleSeries(): SeriesDefinition<
     mode: {
       value: 'PER_BAR',
       affectsCompute: true
+    },
+    baseClose: {
+      value: 0,
+      affectsCompute: true
     }
   }
 
@@ -236,7 +256,11 @@ export function createDeltaCandleSeries(): SeriesDefinition<
     params,
 
     compute(data, seriesParams) {
-      const candles = buildDeltaSeries(data, seriesParams.mode.value)
+      const candles = buildDeltaSeries(
+        data,
+        seriesParams.mode.value,
+        seriesParams.baseClose.value
+      )
       const candlesByTime = new Map<number, DeltaCandle>()
       for (const candle of candles) {
         candlesByTime.set(candle.time, candle)
@@ -251,7 +275,9 @@ export function createDeltaCandleSeries(): SeriesDefinition<
       }
 
       const priorValues = isNewBar ? values : values.slice(0, -1)
-      const start = seriesParams.mode.value === 'CVD' ? previousClose(priorValues) : 0
+      const start = seriesParams.mode.value === 'CVD'
+        ? previousClose(priorValues, seriesParams.baseClose.value)
+        : 0
       const candle = buildDeltaCandle(bar, start, seriesParams.mode.value)
       if (isNewBar) {
         values.push(candle)
