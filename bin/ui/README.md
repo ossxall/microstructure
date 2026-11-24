@@ -65,11 +65,13 @@ const wasm = await loadBasicWasm()
 const result = wasm.add(2, 3) // 5
 ```
 
-La vista de chart obtiene las últimas 500 barras del timeframe seleccionado de
+La vista de chart obtiene las últimas 50 barras del timeframe seleccionado de
 `POST /api/market/get-history` y se suscribe al WebSocket `/api/market/ws` con
-el mismo `source`, `symbol` y `timeframe`. Cada serie recibe el objeto `Bar`
-completo, incluyendo los campos de microestructura; solo se normalizan el
-tiempo y OHLCV usados para dibujar. El proxy HTTP usa
+el mismo `source`, `symbol` y `timeframe`. La consulta histórica omite
+`raw_ticks` para evitar respuestas de cientos de MB; el Institutional Trade
+Profile carga aparte los `raw_ticks` de las últimas 15 Bars 1m. El WebSocket
+sigue entregando Bars completos. Solo se normalizan el tiempo y OHLCV usados
+para dibujar. El proxy HTTP usa
 `NUXT_MARKET_SERVER_URL` (por defecto `http://localhost:3001/api/market`) y la
 URL pública del WebSocket se puede cambiar con
 `NUXT_PUBLIC_MARKET_WEBSOCKET_URL` (por defecto

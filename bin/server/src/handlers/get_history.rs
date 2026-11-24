@@ -21,6 +21,12 @@ pub struct HistoryRequest {
     #[serde(default = "default_timeframe")]
     pub timeframe: String,
     pub limit: u64,
+    #[serde(default = "default_include_raw_ticks")]
+    pub include_raw_ticks: bool,
+}
+
+fn default_include_raw_ticks() -> bool {
+    true
 }
 
 pub async fn handler(
@@ -47,24 +53,19 @@ pub async fn handler(
     let questdb = Arc::clone(&state.questdb);
     let source = request.source;
     let symbol = request.symbol;
+    let include_raw_ticks = request.include_raw_ticks;
     let payloads = tokio::task::spawn_blocking(move || {
-        query_history(&questdb, table, &source, &symbol, limit)
+        query_history(&questdb, table, &source, &symbol, limit, include_raw_ticks)
     })
     .await
     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
 
-    let history = payloads
-        .iter()
-        .map(|payload| serde_json::from_str::<Value>(payload))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-
     Ok(Json(json!({
         "success": true,
         "message": "ok",
         "data": {
-            "history": history
+            "history": payloads
         }
     })))
 }
@@ -75,7 +76,8 @@ fn query_history(
     source: &str,
     symbol: &str,
     limit: i64,
-) -> AnyResult<Vec<String>> {
+    include_raw_ticks: bool,
+) -> AnyResult<Vec<Value>> {
     let mut reader = db
         .borrow_reader()
         .context("Failed to open QuestDB bars reader")?;
@@ -92,7 +94,7 @@ fn query_history(
         .execute()
         .context("Failed to query QuestDB bars")?;
 
-    let mut payloads = Vec::new();
+    let mut history = Vec::new();
     while let Some(batch) = cursor
         .next_batch()
         .context("Failed while reading QuestDB bars")?
@@ -102,24 +104,34 @@ fn query_history(
             _ => anyhow::bail!("QuestDB bar payload is not VARCHAR"),
         };
         for row in 0..batch.row_count() {
-            payloads.push(
-                values
-                    .value(row)
-                    .context("QuestDB returned a null bar payload")?
-                    .to_string(),
-            );
+            let payload = values
+                .value(row)
+                .context("QuestDB returned a null bar payload")?;
+            let mut bar = serde_json::from_str::<Value>(payload)
+                .context("QuestDB returned an invalid bar payload")?;
+            if !include_raw_ticks {
+                strip_raw_ticks(&mut bar);
+            }
+            history.push(bar);
         }
     }
 
     // The query selects the most recent `limit` rows first; return the
     // retained history in ascending time order for chart consumers.
-    payloads.reverse();
-    Ok(payloads)
+    history.reverse();
+    Ok(history)
+}
+
+fn strip_raw_ticks(bar: &mut Value) {
+    if let Some(fields) = bar.as_object_mut() {
+        fields.remove("raw_ticks");
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::HistoryRequest;
+    use super::{HistoryRequest, strip_raw_ticks};
+    use serde_json::json;
 
     #[test]
     fn history_requests_default_to_one_minute() {
@@ -127,5 +139,31 @@ mod tests {
             serde_json::from_str(r#"{"source":"binance","symbol":"BTCUSDT","limit":500}"#).unwrap();
 
         assert_eq!(request.timeframe, "1m");
+        assert!(request.include_raw_ticks);
+    }
+
+    #[test]
+    fn history_requests_can_omit_raw_ticks() {
+        let request: HistoryRequest = serde_json::from_str(
+            r#"{"source":"binance","symbol":"BTCUSDT","limit":500,"include_raw_ticks":false}"#,
+        )
+        .unwrap();
+
+        assert!(!request.include_raw_ticks);
+    }
+
+    #[test]
+    fn compact_history_omits_raw_ticks_but_preserves_bar_fields() {
+        let mut bar = json!({
+            "timestamp": "123",
+            "raw_ticks": [{"price": "100", "qty": "2"}],
+            "footprint": {"levels": [{"price": "100"}]}
+        });
+
+        strip_raw_ticks(&mut bar);
+
+        assert!(bar.get("raw_ticks").is_none());
+        assert_eq!(bar["timestamp"], "123");
+        assert_eq!(bar["footprint"]["levels"][0]["price"], "100");
     }
 }
