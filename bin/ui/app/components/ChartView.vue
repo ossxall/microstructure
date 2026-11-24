@@ -5,6 +5,12 @@ import type { AnyChartSeries, ChartEngine } from '~/packages/open-charts/src/cor
 import type { Bar } from '~/utils/bar'
 import { createOhlcvSeries } from '~/utils/ohlcvSeries'
 import {
+  countAttackBubbles,
+  createAttackBubbleSeries,
+  DEFAULT_ATTACK_BUBBLE_OPTIONS,
+  type AttackBubbleOptions
+} from '~/utils/attackBubbleSeries'
+import {
   createDeltaProfileSeries,
   deltaProfileDefaults,
   RollingDeltaProfile
@@ -86,6 +92,8 @@ const deltaMode = ref<DeltaMode>('PER_BAR')
 const deltaCandleCount = ref(0)
 const flowCandleStyle = ref<FlowCandleStyle>('CANDLE')
 const bidAskFlowCandleCount = ref(0)
+const showAttackBubbles = ref(true)
+const attackBubbleCount = ref(0)
 const canApply = computed(() => {
   return !isLoading.value && (
     draftSource.value !== source.value
@@ -105,6 +113,8 @@ let chart: ChartEngine | undefined
 let deltaChart: ChartEngine | undefined
 let bidAskFlowChart: ChartEngine | undefined
 let series: AnyChartSeries | undefined
+let attackBubbleSeries: AnyChartSeries | undefined
+let unsubscribeChartEvents: (() => void) | undefined
 let deltaCandleSeries: AnyChartSeries | undefined
 let bidAskFlowSeries: AnyChartSeries | undefined
 let deltaProfileSeries: AnyChartSeries | undefined
@@ -229,8 +239,31 @@ function upsertBar(bar: Bar): boolean {
   }
 
   barCount.value = bars.size
+  refreshAttackBubbleCount()
   updateLatestBarState()
   return bars.has(bar.time)
+}
+
+function refreshAttackBubbleCount() {
+  const orderedBars = [...bars.values()].sort((left, right) => left.time - right.time)
+  const params = attackBubbleSeries?.getParams()
+  const optionValue = (key: keyof AttackBubbleOptions) => {
+    const value = numberValue(params?.[key])
+    return Number.isFinite(value)
+      ? value
+      : DEFAULT_ATTACK_BUBBLE_OPTIONS[key]
+  }
+  const options: AttackBubbleOptions = {
+    minDominance: optionValue('minDominance'),
+    minRelativeVolume: optionValue('minRelativeVolume'),
+    baselineBars: optionValue('baselineBars')
+  }
+
+  attackBubbleCount.value = countAttackBubbles(orderedBars, options)
+}
+
+function toggleAttackBubbles() {
+  attackBubbleSeries?.setVisible(showAttackBubbles.value)
 }
 
 function updateLatestBarState() {
@@ -254,9 +287,12 @@ function replaceSeries() {
   }
 
   deltaProfileSeries?.destroy({ silent: true })
+  attackBubbleSeries?.destroy({ silent: true })
   series?.destroy({ silent: true })
   series = chart.api.addSeries(createOhlcvSeries())
   deltaProfileSeries = chart.api.addSeries(createDeltaProfileSeries(deltaProfile))
+  attackBubbleSeries = chart.api.addSeries(createAttackBubbleSeries())
+  attackBubbleSeries.setVisible(showAttackBubbles.value)
 }
 
 function replaceDeltaCandleSeries() {
@@ -345,6 +381,7 @@ function renderCurrentBars() {
   if (currentBars.length > 0) {
     // Full replacement is reserved for initial history hydration.
     series.setData(currentBars)
+    attackBubbleSeries?.setData(currentBars)
     deltaProfileSeries?.setData(currentBars)
   }
 
@@ -583,6 +620,7 @@ async function resyncMarketHistory(
     changedBars.sort((left, right) => left.time - right.time)
     for (const bar of changedBars) {
       series.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+      attackBubbleSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
       deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
     }
 
@@ -716,6 +754,7 @@ function connectWebSocket(
         if (bar) {
           if (upsertBar(bar) && seriesHydrated) {
             series?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+            attackBubbleSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
             deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
           }
         }
@@ -760,6 +799,7 @@ async function loadMarketData(
   deltaCandleCount.value = 0
   bidAskFlowCandleCount.value = 0
   barCount.value = 0
+  attackBubbleCount.value = 0
   latestBarState.value = 'none'
   profileDiagnostic.value = ''
   profileBarCount.value = 0
@@ -891,6 +931,14 @@ onMounted(() => {
   }
 
   chart = createChart(chartHost.value)
+  unsubscribeChartEvents = chart.subscribe((event) => {
+    if (
+      event.type === 'series:params'
+      && event.seriesId === 'aggressive-attack-bubbles'
+    ) {
+      refreshAttackBubbleCount()
+    }
+  })
   replaceSeries()
   if (deltaChartHost.value) {
     deltaChart = createChart(deltaChartHost.value)
@@ -905,6 +953,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   feedGeneration++
+  unsubscribeChartEvents?.()
+  unsubscribeChartEvents = undefined
   stopWebSocket()
   stopDeltaProfileWebSocket()
   chart?.api.destroy()
@@ -914,6 +964,7 @@ onBeforeUnmount(() => {
   deltaChart = undefined
   bidAskFlowChart = undefined
   series = undefined
+  attackBubbleSeries = undefined
   deltaCandleSeries = undefined
   bidAskFlowSeries = undefined
   deltaProfileSeries = undefined
@@ -1204,11 +1255,25 @@ onBeforeUnmount(() => {
       {{ profileDiagnostic }}
     </p>
 
-    <div class="flex items-center justify-between text-xs text-muted">
+    <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
       <span>{{ source }} · {{ symbol }} · {{ timeframe }}</span>
-      <div class="flex items-center gap-3">
+      <div class="flex flex-wrap items-center gap-3">
         <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
           Delta Profile 1m · {{ profileSettings.rollingWindowMinutes }}m · {{ profileBarCount }} Bars
+        </span>
+        <label
+          class="flex items-center gap-2"
+          title="Desequilibrio de agresores, volumen relativo y confirmación del precio"
+        >
+          <input
+            v-model="showAttackBubbles"
+            type="checkbox"
+            @change="toggleAttackBubbles"
+          >
+          Ataques {{ attackBubbleCount }}
+        </label>
+        <span class="text-muted">
+          Desequilibrio agresor + expansión de volumen + cierre confirmatorio
         </span>
         <span
           v-if="latestBarState !== 'none'"
