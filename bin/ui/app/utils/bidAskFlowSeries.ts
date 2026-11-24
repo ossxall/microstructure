@@ -105,7 +105,7 @@ export function buildBidAskFlowCandle(
     if (
       !Number.isFinite(qty)
       || qty < 0
-      || !Number.isFinite(buyerMaker)
+      || (buyerMaker !== 0 && buyerMaker !== 1)
     ) {
       continue
     }
@@ -315,6 +315,8 @@ export function createBidAskFlowSeries(): SeriesDefinition<
         const bodyHeight = Math.max(1.5, Math.abs(yClose - yOpen))
         ctx.fillStyle = color
         ctx.fillRect(x - halfWidth, bodyTop, candleWidth, bodyHeight)
+        ctx.strokeStyle = color
+        ctx.strokeRect(x - halfWidth, bodyTop, candleWidth, bodyHeight)
       }
     },
 

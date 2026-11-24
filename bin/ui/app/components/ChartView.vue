@@ -1305,7 +1305,7 @@ onBeforeUnmount(() => {
             FLUJO BID/ASK ACUMULADO
           </h2>
           <p class="mt-1 text-xs text-muted">
-            Unidad qty · OHLC encadenado desde cero · solo raw_ticks · {{ bidAskFlowCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
+            Unidad qty · OHLC acumulado desde la primera barra cargada (base 0) · solo raw_ticks · {{ bidAskFlowCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
           </p>
         </div>
         <label class="flex flex-col gap-1 text-xs font-medium text-muted">
