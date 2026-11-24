@@ -21,7 +21,7 @@ mod registry;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use config::Config;
-use model::{Bar1m, Tick, build_bar};
+use model::{Bar, Tick, build_bar_for_timeframe};
 use persistence::{BarEvent, PendingEvent};
 use pulsar::{Pulsar, TokioExecutor, producer::Producer};
 use questdb::QuestDb;
@@ -46,22 +46,18 @@ async fn main() -> Result<()> {
             config.questdb_sf_dir.display()
         )
     })?;
-    let mut ids = IdRegistry::load(config.id_registry_path.clone())?;
+    let mut ids =
+        IdRegistry::load_for_timeframe(config.id_registry_path.clone(), &config.timeframe)?;
     let questdb = connect_questdb(&config).await?;
     let pulsar = Pulsar::builder(&config.pulsar_url, TokioExecutor)
         .build()
         .await
         .context("Failed to connect to Pulsar")?;
-    let mut producer = pulsar
-        .producer()
-        .with_topic(&config.pulsar_topic)
-        .with_name("microstructure-aggregator-bars-1m")
-        .build()
-        .await
-        .context("Failed to create 1-minute bar event producer")?;
+    let mut producers = BTreeMap::<String, Producer<TokioExecutor>>::new();
 
     info!(
-        topic = %config.pulsar_topic,
+        timeframe = %config.timeframe,
+        pulsar_namespace = %config.pulsar_namespace,
         poll_seconds = config.poll_interval_seconds,
         allowed_lateness_seconds = config.allowed_lateness_seconds,
         reprocess_minutes = config.reprocess_minutes,
@@ -71,16 +67,18 @@ async fn main() -> Result<()> {
     let period = Duration::from_secs(config.poll_interval_seconds);
     let first_tick = aligned_next_poll(&config, period);
     let mut poll = interval_at(first_tick, period);
-    let mut next_minute_ms = initialize_cursor(Arc::clone(&questdb)).await?;
+    let mut next_bucket_ms =
+        initialize_cursor(Arc::clone(&questdb), &config.timeframe, config.timeframe_ms).await?;
 
     // Run once at startup to recover completed bars and outbox events, then
     // continue on the configured cadence.
     if let Err(error) = run_cycle(
         &config,
         Arc::clone(&questdb),
-        &mut producer,
+        &pulsar,
+        &mut producers,
         &mut ids,
-        &mut next_minute_ms,
+        &mut next_bucket_ms,
     )
     .await
     {
@@ -96,9 +94,10 @@ async fn main() -> Result<()> {
                 if let Err(error) = run_cycle(
                     &config,
                     Arc::clone(&questdb),
-                    &mut producer,
+                    &pulsar,
+                    &mut producers,
                     &mut ids,
-                    &mut next_minute_ms,
+                    &mut next_bucket_ms,
                 ).await {
                     error!(
                     error = %format!("{error:#}"),
@@ -114,18 +113,21 @@ async fn main() -> Result<()> {
         }
     }
 
-    producer
-        .close()
-        .await
-        .context("Failed to close Pulsar producer")?;
+    for producer in producers.values_mut() {
+        producer
+            .close()
+            .await
+            .context("Failed to close Pulsar producer")?;
+    }
     Ok(())
 }
 
 async fn connect_questdb(config: &Config) -> Result<Arc<QuestDb>> {
     let connect_string = questdb_connect_string(config);
+    let timeframe = config.timeframe.clone();
     let db = tokio::task::spawn_blocking(move || {
         let db = persistence::connect(&connect_string)?;
-        persistence::ensure_schema(&db)?;
+        persistence::ensure_schema(&db, &timeframe)?;
         Ok::<_, anyhow::Error>(Arc::new(db))
     })
     .await
@@ -150,20 +152,25 @@ fn questdb_connect_string(config: &Config) -> String {
 
 fn aligned_next_poll(config: &Config, period: Duration) -> Instant {
     let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-    let minute_start = now_ms.div_euclid(MINUTE_MS) * MINUTE_MS;
+    let bucket_start = now_ms.div_euclid(config.timeframe_ms) * config.timeframe_ms;
     let lateness_ms = config.allowed_lateness_seconds.saturating_mul(1_000);
-    let target = minute_start
-        .saturating_add(MINUTE_MS)
+    let target = bucket_start
+        .saturating_add(config.timeframe_ms)
         .saturating_add(lateness_ms);
     let delay_ms = target.saturating_sub(now_ms).max(1);
     let configured_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
     Instant::now() + Duration::from_millis(delay_ms.min(configured_ms))
 }
 
-async fn initialize_cursor(db: Arc<QuestDb>) -> Result<Option<u64>> {
+async fn initialize_cursor(
+    db: Arc<QuestDb>,
+    timeframe: &str,
+    timeframe_ms: u64,
+) -> Result<Option<u64>> {
     let saved = {
         let db = Arc::clone(&db);
-        tokio::task::spawn_blocking(move || persistence::read_cursor_ms(&db))
+        let timeframe = timeframe.to_string();
+        tokio::task::spawn_blocking(move || persistence::read_cursor_ms(&db, &timeframe))
             .await
             .context("QuestDB cursor query task failed")??
     };
@@ -180,7 +187,7 @@ async fn initialize_cursor(db: Arc<QuestDb>) -> Result<Option<u64>> {
         .map(|time_us| {
             let time_ms = u64::try_from(time_us / 1_000)
                 .context("First tick timestamp is before the Unix epoch")?;
-            Ok(time_ms.div_euclid(MINUTE_MS) * MINUTE_MS)
+            Ok(time_ms.div_euclid(timeframe_ms) * timeframe_ms)
         })
         .transpose()
 }
@@ -188,16 +195,25 @@ async fn initialize_cursor(db: Arc<QuestDb>) -> Result<Option<u64>> {
 async fn run_cycle(
     config: &Config,
     db: Arc<QuestDb>,
-    producer: &mut Producer<TokioExecutor>,
+    pulsar: &Pulsar<TokioExecutor>,
+    producers: &mut BTreeMap<String, Producer<TokioExecutor>>,
     ids: &mut IdRegistry,
-    next_minute_ms: &mut Option<u64>,
+    next_bucket_ms: &mut Option<u64>,
 ) -> Result<()> {
-    dispatch_pending_events(Arc::clone(&db), producer).await?;
+    dispatch_pending_events(
+        Arc::clone(&db),
+        &config.timeframe,
+        pulsar,
+        producers,
+        &config.pulsar_namespace,
+    )
+    .await?;
 
-    if next_minute_ms.is_none() {
-        *next_minute_ms = initialize_cursor(Arc::clone(&db)).await?;
+    if next_bucket_ms.is_none() {
+        *next_bucket_ms =
+            initialize_cursor(Arc::clone(&db), &config.timeframe, config.timeframe_ms).await?;
     }
-    let Some(next) = *next_minute_ms else {
+    let Some(next) = *next_bucket_ms else {
         return Ok(());
     };
     let first_tick = {
@@ -212,63 +228,81 @@ async fn run_cycle(
     let earliest_tick_ms = u64::try_from(first_tick_us)
         .context("First tick timestamp is before the Unix epoch")?
         / 1_000;
-    let earliest_bucket_ms = earliest_tick_ms.div_euclid(MINUTE_MS) * MINUTE_MS;
+    let interval_ms = config.timeframe_ms;
+    let earliest_bucket_ms = earliest_tick_ms.div_euclid(interval_ms) * interval_ms;
 
     let now_ms = u64::try_from(Utc::now().timestamp_millis())?;
     let deadline_ms = now_ms.saturating_sub(config.allowed_lateness_seconds.saturating_mul(1_000));
     let latest_closed_start =
-        (deadline_ms.div_euclid(MINUTE_MS) * MINUTE_MS).checked_sub(MINUTE_MS);
+        (deadline_ms.div_euclid(interval_ms) * interval_ms).checked_sub(interval_ms);
     let Some(latest_closed_start) = latest_closed_start else {
         return Ok(());
     };
 
-    let reprocess_span_ms = config
-        .reprocess_minutes
-        .saturating_sub(1)
-        .saturating_mul(MINUTE_MS);
-    let scan_start = next
-        .saturating_sub(reprocess_span_ms)
+    let reprocess_span_ms = config.reprocess_minutes.saturating_mul(MINUTE_MS);
+    // Recompute whole timeframe buckets, rounding the time horizon backward to
+    // its containing bucket (at least the most recently closed bucket).
+    let scan_start = (next.saturating_sub(reprocess_span_ms) / interval_ms * interval_ms)
         .max(earliest_bucket_ms);
     let mut bucket_ms = scan_start;
     while bucket_ms <= latest_closed_start {
-        process_bucket(Arc::clone(&db), ids, bucket_ms).await?;
-        dispatch_pending_events(Arc::clone(&db), producer).await?;
+        process_bucket(
+            Arc::clone(&db),
+            &config.timeframe,
+            interval_ms,
+            ids,
+            bucket_ms,
+        )
+        .await?;
+        dispatch_pending_events(
+            Arc::clone(&db),
+            &config.timeframe,
+            pulsar,
+            producers,
+            &config.pulsar_namespace,
+        )
+        .await?;
 
         if bucket_ms >= next {
             let following = bucket_ms
-                .checked_add(MINUTE_MS)
+                .checked_add(interval_ms)
                 .context("Aggregator cursor overflows u64")?;
             {
                 let db = Arc::clone(&db);
-                tokio::task::spawn_blocking(move || persistence::persist_cursor(&db, following))
-                    .await
-                    .context("QuestDB cursor persistence task failed")??;
+                let timeframe = config.timeframe.clone();
+                tokio::task::spawn_blocking(move || {
+                    persistence::persist_cursor(&db, &timeframe, following)
+                })
+                .await
+                .context("QuestDB cursor persistence task failed")??;
             }
-            *next_minute_ms = Some(following);
+            *next_bucket_ms = Some(following);
         }
         bucket_ms = bucket_ms
-            .checked_add(MINUTE_MS)
-            .context("Minute bucket timestamp overflows u64")?;
+            .checked_add(interval_ms)
+            .context("Timeframe bucket timestamp overflows u64")?;
     }
     Ok(())
 }
 
 async fn process_bucket(
     db: Arc<QuestDb>,
+    timeframe: &str,
+    timeframe_ms: u64,
     ids: &mut IdRegistry,
     bucket_start_ms: u64,
 ) -> Result<()> {
     let start_us = i64::try_from(
         bucket_start_ms
             .checked_mul(1_000)
-            .context("Minute bucket timestamp overflows")?,
+            .context("Timeframe bucket timestamp overflows")?,
     )?;
     let end_us = i64::try_from(
         bucket_start_ms
-            .checked_add(MINUTE_MS)
-            .context("Minute bucket end overflows")?
+            .checked_add(timeframe_ms)
+            .context("Timeframe bucket end overflows")?
             .checked_mul(1_000)
-            .context("Minute bucket end timestamp overflows")?,
+            .context("Timeframe bucket end timestamp overflows")?,
     )?;
     let ticks = {
         let db = Arc::clone(&db);
@@ -290,17 +324,27 @@ async fn process_bucket(
     let bucket_time_us = start_us;
     let existing = {
         let db = Arc::clone(&db);
-        tokio::task::spawn_blocking(move || persistence::existing_bars(&db, bucket_time_us))
-            .await
-            .context("QuestDB existing-bars query task failed")??
+        let timeframe = timeframe.to_string();
+        tokio::task::spawn_blocking(move || {
+            persistence::existing_bars(&db, &timeframe, bucket_time_us)
+        })
+        .await
+        .context("QuestDB existing-bars query task failed")??
     };
 
     for ((source, symbol), group) in groups {
         let (source_id, symbol_id) = ids.ids_for(&source, &symbol)?;
-        let mut bar =
-            build_bar(&group, bucket_start_ms, source_id, symbol_id).with_context(|| {
-                format!("Failed to aggregate {source}/{symbol} at {bucket_start_ms}")
-            })?;
+        let mut bar = build_bar_for_timeframe(
+            &group,
+            bucket_start_ms,
+            timeframe,
+            timeframe_ms,
+            source_id,
+            symbol_id,
+        )
+        .with_context(|| {
+            format!("Failed to aggregate {source}/{symbol} at {bucket_start_ms} ({timeframe})")
+        })?;
         let prior = existing.get(&(source.clone(), symbol.clone()));
         let mut changed = true;
         if let Some(prior) = prior {
@@ -321,8 +365,9 @@ async fn process_bucket(
         let event_exists = {
             let db = Arc::clone(&db);
             let event_id = event_id.clone();
+            let timeframe = timeframe.to_string();
             tokio::task::spawn_blocking(move || {
-                persistence::outbox_event_exists(&db, time_us, &event_id)
+                persistence::outbox_event_exists(&db, &timeframe, time_us, &event_id)
             })
             .await
             .context("QuestDB outbox lookup task failed")??
@@ -332,39 +377,42 @@ async fn process_bucket(
         }
 
         if changed {
-            persist_bar(Arc::clone(&db), &bar, &event_id).await?;
+            persist_bar(Arc::clone(&db), timeframe, &bar, &event_id).await?;
         }
-        persist_event(Arc::clone(&db), &bar, &event_id).await?;
+        persist_event(Arc::clone(&db), timeframe, &bar, &event_id).await?;
         info!(
             source = %bar.source,
             symbol = %bar.symbol,
             timestamp = bar.timestamp,
             revision = bar.revision,
             ticks = bar.identity.n_trades,
-            "Persisted 1-minute bar and queued Pulsar event"
+            "Persisted timeframe bar and queued Pulsar event"
         );
     }
 
     Ok(())
 }
 
-async fn persist_bar(db: Arc<QuestDb>, bar: &Bar1m, event_id: &str) -> Result<()> {
+async fn persist_bar(db: Arc<QuestDb>, timeframe: &str, bar: &Bar, event_id: &str) -> Result<()> {
     let db = Arc::clone(&db);
     let bar = bar.clone();
     let event_id = event_id.to_string();
-    tokio::task::spawn_blocking(move || persistence::persist_bar(&db, &bar, &event_id))
+    let timeframe = timeframe.to_string();
+    tokio::task::spawn_blocking(move || persistence::persist_bar(&db, &timeframe, &bar, &event_id))
         .await
         .context("QuestDB bar persistence task failed")??;
     Ok(())
 }
 
-async fn persist_event(db: Arc<QuestDb>, bar: &Bar1m, event_id: &str) -> Result<()> {
+async fn persist_event(db: Arc<QuestDb>, timeframe: &str, bar: &Bar, event_id: &str) -> Result<()> {
+    let event_type = format!("bar.{}", bar.timeframe);
     let event = BarEvent {
         event_id,
-        event_type: "bar.1m",
+        event_type: &event_type,
         timestamp: bar.timestamp,
         source: &bar.source,
         symbol: &bar.symbol,
+        timeframe: &bar.timeframe,
         revision: bar.revision,
         data: bar,
     };
@@ -372,13 +420,14 @@ async fn persist_event(db: Arc<QuestDb>, bar: &Bar1m, event_id: &str) -> Result<
     debug!(
         event_id,
         payload_bytes = payload.len(),
-        "Encoded 1-minute bar event"
+        "Encoded timeframe bar event"
     );
     let db = Arc::clone(&db);
     let bar = bar.clone();
     let event_id = event_id.to_string();
+    let timeframe = timeframe.to_string();
     tokio::task::spawn_blocking(move || {
-        persistence::persist_pending_event(&db, &bar, &event_id, &payload)
+        persistence::persist_pending_event(&db, &timeframe, &bar, &event_id, &payload)
     })
     .await
     .context("QuestDB outbox persistence task failed")??;
@@ -387,25 +436,54 @@ async fn persist_event(db: Arc<QuestDb>, bar: &Bar1m, event_id: &str) -> Result<
 
 async fn dispatch_pending_events(
     db: Arc<QuestDb>,
-    producer: &mut Producer<TokioExecutor>,
+    timeframe: &str,
+    pulsar: &Pulsar<TokioExecutor>,
+    producers: &mut BTreeMap<String, Producer<TokioExecutor>>,
+    pulsar_namespace: &str,
 ) -> Result<()> {
     let pending = {
         let db = Arc::clone(&db);
-        tokio::task::spawn_blocking(move || persistence::pending_events(&db))
+        let timeframe = timeframe.to_string();
+        tokio::task::spawn_blocking(move || persistence::pending_events(&db, &timeframe))
             .await
             .context("QuestDB outbox query task failed")??
     };
     for event in pending {
-        send_event(producer, &event).await?;
+        send_event(pulsar, producers, pulsar_namespace, &event).await?;
         let db = Arc::clone(&db);
-        tokio::task::spawn_blocking(move || persistence::mark_event_published(&db, &event))
-            .await
-            .context("QuestDB outbox acknowledgement task failed")??;
+        let timeframe = timeframe.to_string();
+        tokio::task::spawn_blocking(move || {
+            persistence::mark_event_published(&db, &timeframe, &event)
+        })
+        .await
+        .context("QuestDB outbox acknowledgement task failed")??;
     }
     Ok(())
 }
 
-async fn send_event(producer: &mut Producer<TokioExecutor>, event: &PendingEvent) -> Result<()> {
+async fn send_event(
+    pulsar: &Pulsar<TokioExecutor>,
+    producers: &mut BTreeMap<String, Producer<TokioExecutor>>,
+    namespace: &str,
+    event: &PendingEvent,
+) -> Result<()> {
+    let topic = bar_topic_name(namespace, &event.source, &event.symbol, &event.timeframe)?;
+    if !producers.contains_key(&topic) {
+        let producer = pulsar
+            .producer()
+            .with_topic(topic.clone())
+            .with_name(format!(
+                "microstructure-aggregator-{}-{}-{}",
+                event.source, event.symbol, event.timeframe
+            ))
+            .build()
+            .await
+            .with_context(|| format!("Failed to create Pulsar producer for {topic}"))?;
+        producers.insert(topic.clone(), producer);
+    }
+    let producer = producers
+        .get_mut(&topic)
+        .expect("the producer was inserted above");
     producer
         .send_non_blocking(event.pulsar_payload().to_string())
         .await
@@ -416,15 +494,42 @@ async fn send_event(producer: &mut Producer<TokioExecutor>, event: &PendingEvent
         event_id = %event.event_id,
         source = %event.source,
         symbol = %event.symbol,
+        timeframe = %event.timeframe,
+        topic = %topic,
         revision = event.revision,
-        "Published persisted 1-minute bar event"
+        "Published persisted bar event"
     );
     Ok(())
 }
 
+fn ensure_topic_segment(value: &str) -> Result<()> {
+    anyhow::ensure!(
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        "Pulsar topic segment contains invalid characters: {value:?}"
+    );
+    Ok(())
+}
+
+fn bar_topic_name(namespace: &str, source: &str, symbol: &str, timeframe: &str) -> Result<String> {
+    ensure_topic_segment(source)?;
+    ensure_topic_segment(symbol)?;
+    ensure_topic_segment(timeframe)?;
+    anyhow::ensure!(
+        !namespace.trim().is_empty(),
+        "PULSAR_NAMESPACE cannot be empty"
+    );
+    Ok(format!(
+        "{}/bars-{source}-{symbol}-{timeframe}",
+        namespace.trim().trim_end_matches('/')
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::questdb_connect_string;
+    use super::{bar_topic_name, questdb_connect_string};
     use crate::config::Config;
     use std::path::PathBuf;
 
@@ -432,7 +537,9 @@ mod tests {
     fn questdb_connection_applies_frame_limits_and_keeps_them_above_the_reported_failure() {
         let config = Config {
             pulsar_url: "pulsar://localhost:6650".to_string(),
-            pulsar_topic: "persistent://public/default/bars-1m".to_string(),
+            pulsar_namespace: "persistent://public/default".to_string(),
+            timeframe: "1m".to_string(),
+            timeframe_ms: 60_000,
             questdb_connect: "ws::addr=localhost:9000".to_string(),
             questdb_sf_dir: PathBuf::from("/tmp/aggregator-sf"),
             questdb_max_buf_size_bytes: 32 * 1024 * 1024,
@@ -451,6 +558,21 @@ mod tests {
                 "ws::addr=localhost:9000;max_buf_size=33554432;sf_max_segment_bytes=33554432;"
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn names_the_topic_for_a_source_symbol_and_timeframe() {
+        assert_eq!(
+            bar_topic_name("persistent://public/default/", "binance", "BTCUSDT", "1m").unwrap(),
+            "persistent://public/default/bars-binance-BTCUSDT-1m"
+        );
+        assert_eq!(
+            bar_topic_name("persistent://public/default/", "binance", "BTCUSDT", "5m").unwrap(),
+            "persistent://public/default/bars-binance-BTCUSDT-5m"
+        );
+        assert!(
+            bar_topic_name("persistent://public/default", "binance", "BTC/USDT", "1m").is_err()
         );
     }
 }

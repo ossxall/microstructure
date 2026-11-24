@@ -25,7 +25,9 @@ const DEFAULT_QUESTDB_SF_MAX_SEGMENT_BYTES: u64 = 32 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub pulsar_url: String,
-    pub pulsar_topic: String,
+    pub pulsar_namespace: String,
+    pub timeframe: String,
+    pub timeframe_ms: u64,
     pub questdb_connect: String,
     pub questdb_sf_dir: PathBuf,
     pub questdb_max_buf_size_bytes: usize,
@@ -44,11 +46,24 @@ impl Config {
                 .with_context(|| format!("Failed to load {}", env_dev_path.display()))?;
         }
 
+        let timeframe = read("AGGREGATOR_TIMEFRAME", "1m");
+        let timeframe_ms = timeframe_duration_ms(&timeframe).ok_or_else(|| {
+            anyhow!(
+                "AGGREGATOR_TIMEFRAME={} is not supported; use one of 1m, 5m, 15m, 30m, 1h, 4h, or 1d",
+                timeframe
+            )
+        })?;
+        let questdb_sf_dir = timeframe_path(
+            resolve_path("QUESTDB_SF_DIR", "./data/questdb-sf"),
+            &timeframe,
+        );
         let config = Self {
             pulsar_url: read("PULSAR_URL", "pulsar://localhost:6650"),
-            pulsar_topic: read("PULSAR_BARS_TOPIC", "persistent://public/default/bars-1m"),
+            pulsar_namespace: read("PULSAR_NAMESPACE", "persistent://public/default"),
+            timeframe,
+            timeframe_ms,
             questdb_connect: read("QUESTDB_CONNECT", "ws::addr=localhost:9000"),
-            questdb_sf_dir: resolve_path("QUESTDB_SF_DIR", "./data/questdb-sf"),
+            questdb_sf_dir,
             questdb_max_buf_size_bytes: read_parse(
                 "QUESTDB_MAX_BUF_SIZE_BYTES",
                 DEFAULT_QUESTDB_MAX_BUF_SIZE_BYTES,
@@ -66,8 +81,8 @@ impl Config {
         if config.pulsar_url.trim().is_empty() {
             bail!("PULSAR_URL cannot be empty");
         }
-        if config.pulsar_topic.trim().is_empty() {
-            bail!("PULSAR_BARS_TOPIC cannot be empty");
+        if config.pulsar_namespace.trim().is_empty() {
+            bail!("PULSAR_NAMESPACE cannot be empty");
         }
         if config.poll_interval_seconds == 0 {
             bail!("POLL_INTERVAL_SECONDS must be greater than zero");
@@ -128,6 +143,19 @@ impl Config {
     }
 }
 
+fn timeframe_duration_ms(timeframe: &str) -> Option<u64> {
+    match timeframe {
+        "1m" => Some(60_000),
+        "5m" => Some(5 * 60_000),
+        "15m" => Some(15 * 60_000),
+        "30m" => Some(30 * 60_000),
+        "1h" => Some(60 * 60_000),
+        "4h" => Some(4 * 60 * 60_000),
+        "1d" => Some(24 * 60 * 60_000),
+        _ => None,
+    }
+}
+
 fn resolve_path(name: &str, default: &str) -> PathBuf {
     let path = PathBuf::from(read(name, default));
     if path.is_absolute() {
@@ -135,6 +163,21 @@ fn resolve_path(name: &str, default: &str) -> PathBuf {
     } else {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
     }
+}
+
+fn timeframe_path(path: PathBuf, timeframe: &str) -> PathBuf {
+    if timeframe == "1m" {
+        return path;
+    }
+
+    let Some(file_name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return path;
+    };
+    let timeframe_name = match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) => format!("{file_name}-{timeframe}.{extension}"),
+        None => format!("{file_name}-{timeframe}"),
+    };
+    path.with_file_name(timeframe_name)
 }
 
 fn read(name: &str, default: &str) -> String {
@@ -154,5 +197,42 @@ where
             .parse()
             .map_err(|error| anyhow!("Invalid {name}: {error}")),
         Err(_) => Ok(default),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{timeframe_duration_ms, timeframe_path};
+    use std::path::PathBuf;
+
+    #[test]
+    fn keeps_the_1m_paths_and_separates_other_timeframes() {
+        let registry = PathBuf::from("/data/ids.json");
+        let store_and_forward = PathBuf::from("/data/questdb-sf");
+
+        assert_eq!(
+            timeframe_path(registry.clone(), "1m"),
+            PathBuf::from("/data/ids.json")
+        );
+        assert_eq!(
+            timeframe_path(registry, "5m"),
+            PathBuf::from("/data/ids-5m.json")
+        );
+        assert_eq!(
+            timeframe_path(store_and_forward, "5m"),
+            PathBuf::from("/data/questdb-sf-5m")
+        );
+    }
+
+    #[test]
+    fn supports_the_timeframes_exposed_by_the_market_server() {
+        assert_eq!(timeframe_duration_ms("1m"), Some(60_000));
+        assert_eq!(timeframe_duration_ms("5m"), Some(300_000));
+        assert_eq!(timeframe_duration_ms("15m"), Some(900_000));
+        assert_eq!(timeframe_duration_ms("30m"), Some(1_800_000));
+        assert_eq!(timeframe_duration_ms("1h"), Some(3_600_000));
+        assert_eq!(timeframe_duration_ms("4h"), Some(14_400_000));
+        assert_eq!(timeframe_duration_ms("1d"), Some(86_400_000));
+        assert_eq!(timeframe_duration_ms("2m"), None);
     }
 }

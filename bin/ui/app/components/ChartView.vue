@@ -21,6 +21,7 @@ interface HistoryResponse {
 }
 
 const HISTORY_LIMIT = 500
+const MARKET_DATA_TIMEFRAME: Timeframe = '1m'
 const BAR_TIMEFRAMES: Record<Timeframe, number> = {
   '1m': 60_000,
   '5m': 5 * 60_000,
@@ -233,7 +234,8 @@ function connectWebSocket(nextSource: MarketSource, nextSymbol: string, generati
       nextSocket.send(JSON.stringify({
         action: 'subscribe',
         source: nextSource,
-        symbol: nextSymbol
+        symbol: nextSymbol,
+        timeframe: MARKET_DATA_TIMEFRAME
       }))
     })
 
@@ -301,6 +303,7 @@ async function loadMarketData(nextSource: MarketSource, nextSymbol: string) {
       body: {
         source: nextSource,
         symbol: nextSymbol,
+        timeframe: MARKET_DATA_TIMEFRAME,
         limit: HISTORY_LIMIT
       }
     })

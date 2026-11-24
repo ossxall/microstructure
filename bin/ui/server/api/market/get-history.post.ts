@@ -1,6 +1,7 @@
 interface HistoryRequest {
   source: string
   symbol: string
+  timeframe?: string
   limit: number
 }
 
@@ -10,6 +11,9 @@ export default defineEventHandler(async (event) => {
 
   return $fetch(`${config.marketServerUrl}/get-history`, {
     method: 'POST',
-    body: request
+    body: {
+      ...request,
+      timeframe: request.timeframe ?? '1m'
+    }
   })
 })

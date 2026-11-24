@@ -18,7 +18,7 @@ use num_bigint::{BigInt, BigUint};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 
-pub const SCHEMA_VERSION: u16 = 3;
+pub const SCHEMA_VERSION: u16 = 4;
 pub const HISTOGRAM_BUCKETS: usize = 16;
 pub const PRICE_SCALE: u8 = 8;
 pub const QUANTITY_SCALE: u8 = 8;
@@ -81,12 +81,13 @@ impl Tick {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Bar1m {
+pub struct Bar {
     pub schema_version: u16,
     #[serde(serialize_with = "decimal_string::serialize")]
     pub timestamp: u64,
     pub source: String,
     pub symbol: String,
+    pub timeframe: String,
     #[serde(serialize_with = "decimal_string::serialize")]
     pub revision: u64,
     pub bar_key: String,
@@ -304,7 +305,7 @@ pub struct Timing {
     pub sum_interarrival_sq: u128,
     #[serde(serialize_with = "decimal_string::serialize")]
     pub interarrival_count: u64,
-    pub active_seconds: u8,
+    pub active_seconds: u32,
     pub activity_profile: Vec<u32>,
 }
 
@@ -411,15 +412,28 @@ struct LevelAccumulator {
     sell_count: u32,
 }
 
+#[cfg(test)]
 pub fn build_bar(
     ticks: &[Tick],
     bucket_start_ms: u64,
     source_id: u8,
     symbol_id: u16,
-) -> Result<Bar1m> {
+) -> Result<Bar> {
+    build_bar_for_timeframe(ticks, bucket_start_ms, "1m", 60_000, source_id, symbol_id)
+}
+
+pub fn build_bar_for_timeframe(
+    ticks: &[Tick],
+    bucket_start_ms: u64,
+    timeframe: &str,
+    timeframe_ms: u64,
+    source_id: u8,
+    symbol_id: u16,
+) -> Result<Bar> {
     ensure!(!ticks.is_empty(), "cannot build a bar without ticks");
+    ensure!(timeframe_ms > 0, "timeframe duration must be positive");
     let bucket_end_ms = bucket_start_ms
-        .checked_add(60_000)
+        .checked_add(timeframe_ms)
         .context("bar timestamp overflows")?;
 
     let mut ordered = ticks.to_vec();
@@ -444,7 +458,7 @@ pub fn build_bar(
         let event_ms = tick.time_ms()?;
         ensure!(
             event_ms >= bucket_start_ms && event_ms < bucket_end_ms,
-            "tick falls outside its minute bucket"
+            "tick falls outside its timeframe bucket"
         );
     }
 
@@ -479,6 +493,7 @@ pub fn build_bar(
     let mut max_trade_notional = 0_u128;
     let mut levels = BTreeMap::<i64, LevelAccumulator>::new();
     let mut activity_profile = vec![0_u32; 60];
+    let mut active_second_buckets = HashSet::<u64>::new();
     let mut prices = Vec::with_capacity(ordered.len());
     let mut sizes = Vec::with_capacity(ordered.len());
     let mut event_times_us = Vec::with_capacity(ordered.len());
@@ -568,18 +583,23 @@ pub fn build_bar(
             _ => {}
         }
 
-        let seconds_into_bar = (tick.time_ms()? - bucket_start_ms) / 1_000;
-        let second = usize::try_from(seconds_into_bar.min(59))?;
-        activity_profile[second] = activity_profile[second]
+        let tick_time_ms = tick.time_ms()?;
+        let elapsed_ms = tick_time_ms - bucket_start_ms;
+        let activity_slot = usize::try_from(
+            (elapsed_ms.saturating_mul(activity_profile.len() as u64) / timeframe_ms)
+                .min((activity_profile.len() - 1) as u64),
+        )?;
+        activity_profile[activity_slot] = activity_profile[activity_slot]
             .checked_add(1)
             .context("activity profile counter overflows u32")?;
+        active_second_buckets.insert(tick_time_ms / 1_000);
 
         prices.push(price);
         sizes.push(i128::from(tick.qty));
         event_times_us.push(tick.time_us);
         append_checksum(&mut checksum, tick);
         raw_ticks.push(RawTick {
-            time: tick.time_ms()?,
+            time: tick_time_ms,
             time_us: tick.time_us,
             source: tick.source.clone(),
             symbol: tick.symbol.clone(),
@@ -774,7 +794,7 @@ pub fn build_bar(
         .context("known-side quantity overflows u128")?;
     let footprint = build_footprint(&footprint_levels, known_side_qty)?;
 
-    let active_seconds = u8::try_from(activity_profile.iter().filter(|n| **n > 0).count())?;
+    let active_seconds = u32::try_from(active_second_buckets.len())?;
     let change_values: Vec<i128> = price_changes.iter().map(|v| i128::from(*v)).collect();
     let interarrival_values: Vec<i128> = interarrivals.iter().map(|v| i128::from(*v)).collect();
     let price_values: Vec<i128> = prices.iter().map(|v| i128::from(*v)).collect();
@@ -831,13 +851,17 @@ pub fn build_bar(
     let min_interarrival = interarrivals.iter().copied().min().unwrap_or(0);
     let max_interarrival = interarrivals.iter().copied().max().unwrap_or(0);
 
-    let bar_key = format!("{}/{}/{}", first.source, first.symbol, bucket_start_ms);
+    let bar_key = format!(
+        "{}/{}/{}/{}",
+        first.source, first.symbol, timeframe, bucket_start_ms
+    );
     let header_flags = u32::from(coverage_flags != 0) | (1 << 1);
-    Ok(Bar1m {
+    Ok(Bar {
         schema_version: SCHEMA_VERSION,
         timestamp: bucket_start_ms,
         source: first.source.clone(),
         symbol: first.symbol.clone(),
+        timeframe: timeframe.to_string(),
         revision: 1,
         bar_key,
         header: Header {
@@ -1210,7 +1234,7 @@ fn fnv64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        COVERAGE_UNKNOWN_SIDE_VALUE, FootprintLevel, Tick, build_bar,
+        COVERAGE_UNKNOWN_SIDE_VALUE, FootprintLevel, Tick, build_bar, build_bar_for_timeframe,
         calculate_absorption_exhaustion, compare_trade_ids,
     };
 
@@ -1333,7 +1357,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(bar.schema_version, 3);
+        assert_eq!(bar.schema_version, 4);
         assert_eq!(bar.price_changes.change_sum_qu.len(), 39);
         assert!(bar.price_changes.change_sum_qu.starts_with("625"));
         assert_eq!(bar.trade_size_statistics.size_sum_qu.len(), 39);
@@ -1352,6 +1376,47 @@ mod tests {
         let bar = build_bar(&[tick_us(60_000_999, "1", 100, 1, 0)], 60_000, 1, 1).unwrap();
         assert_eq!(bar.raw_ticks[0].time, 60_000);
         assert_eq!(bar.raw_ticks[0].time_us, 60_000_999);
+    }
+
+    #[test]
+    fn builds_bars_for_non_minute_timeframes() {
+        let bar = build_bar_for_timeframe(
+            &[
+                tick(1_000, "1", 100, 1, 0),
+                tick(4_000, "2", 101, 1, 1),
+                tick(299_999, "3", 102, 1, 0),
+            ],
+            0,
+            "5m",
+            300_000,
+            1,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(bar.timeframe, "5m");
+        assert_eq!(bar.bar_key, "binance/BTCUSDT/5m/0");
+        assert_eq!(bar.timestamp, 0);
+        assert_eq!(bar.timing.active_seconds, 3);
+        assert_eq!(bar.timing.activity_profile[0], 2);
+        assert_eq!(bar.timing.activity_profile[59], 1);
+        assert!(
+            build_bar_for_timeframe(&[tick(300_000, "4", 103, 1, 0)], 0, "5m", 300_000, 1, 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn counts_active_seconds_independently_of_profile_slices() {
+        let ticks: Vec<_> = (0..256)
+            .map(|second| tick(second * 1_000, &second.to_string(), 100, 1, 0))
+            .collect();
+        let bar = build_bar_for_timeframe(&ticks, 0, "1d", 86_400_000, 1, 1).unwrap();
+        let json = serde_json::to_value(&bar).unwrap();
+
+        assert_eq!(bar.timing.active_seconds, 256);
+        assert_eq!(bar.timing.activity_profile[0], 256);
+        assert_eq!(json["timing"]["active_seconds"].as_u64(), Some(256));
     }
 
     #[test]
@@ -1573,6 +1638,9 @@ mod tests {
         .unwrap();
         let json = serde_json::to_value(&bar).unwrap();
 
+        assert_eq!(json["schema_version"].as_u64(), Some(4));
+        assert_eq!(json["header"]["schema_version"].as_u64(), Some(4));
+        assert_eq!(json["timing"]["active_seconds"].as_u64(), Some(2));
         assert_eq!(json["timestamp"].as_str(), Some("0"));
         assert_eq!(json["price"]["open"].as_str(), Some("5000000000"));
         assert!(json["volume_flow"]["total_notional"].is_string());
@@ -1580,17 +1648,19 @@ mod tests {
         assert!(json["raw_ticks"][0]["time_us"].is_string());
         assert!(json["distributions"]["trade_size_hist"][0].is_string());
         let event = crate::persistence::BarEvent {
-            event_id: "binance/BTCUSDT/0:r1",
+            event_id: "binance/BTCUSDT/1m/0:r1",
             event_type: "bar.1m",
             timestamp: bar.timestamp,
             source: &bar.source,
             symbol: &bar.symbol,
+            timeframe: &bar.timeframe,
             revision: bar.revision,
             data: &bar,
         };
         let event_json = serde_json::to_value(event).unwrap();
         assert_eq!(event_json["timestamp"].as_str(), Some("0"));
         assert_eq!(event_json["revision"].as_str(), Some("1"));
+        assert_eq!(event_json["timeframe"], "1m");
 
         let mut checksum = 0xcbf29ce484222325_u64;
         let mut append = |bytes: &[u8]| {

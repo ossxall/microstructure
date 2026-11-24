@@ -14,7 +14,8 @@ message: |-
   {
     "action": "subscribe",
     "source": "binance",
-    "symbol": "BTCUSDT"
+    "symbol": "BTCUSDT",
+    "timeframe": "1m"
   }
 authenticationType: null
 sortPriority: 1

@@ -19,6 +19,7 @@ body:
     {
       "source": "binance",
       "symbol": "BTCUSDT",
+      "timeframe": "1m",
       "limit": 500
     }
 authenticationType: null

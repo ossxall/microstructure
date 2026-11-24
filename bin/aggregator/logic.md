@@ -1,12 +1,15 @@
-# Current `Bar1m` Structure
+# Bar Structure
 
-This document describes the `Bar1m` JSON contract serialized by `src/model.rs`
-(schema version 3). Bars are stored as JSON in QuestDB and included as `data`
-in events published to Pulsar.
+This document describes the schema-version-4 JSON contract serialized by
+`src/model.rs`. The same contract is used by workers configured for different
+timeframes. Bars are stored as JSON in QuestDB and included as `data` in events
+published to Pulsar.
 
-Version 3 is intentionally not wire-compatible with version 2: wide integers
-are decimal strings, the `returns` object/fields are renamed to `price_changes`,
-and `raw_ticks[].time_us` is added.
+Version 4 is intentionally not wire-compatible with version 3: bars now include
+`timeframe`, bar identities include the timeframe, and `active_seconds` counts
+actual active UTC seconds across the whole bar rather than occupied profile
+slices. Version 3 introduced decimal-string wide integers, renamed the `returns`
+object/fields to `price_changes`, and added `raw_ticks[].time_us`.
 
 ## Input Tick
 
@@ -21,24 +24,26 @@ The `ticks` table provides these fields:
 Ticks are sorted by `time_us`, then by a total trade-ID order: IDs that parse as
 `u64` come before text IDs; numeric IDs sort by numeric value, then by their
 original text (so `"02"` precedes `"2"`); text IDs sort lexicographically.
-Each bar corresponds to a UTC minute using the half-open interval
-`[start, end)`. A bar is created only when the interval contains at least one
-tick.
+Each bar corresponds to a UTC timeframe window using the half-open interval
+`[start, end)`. Supported timeframe durations are `1m`, `5m`, `15m`, `30m`,
+`1h`, `4h`, and `1d`. A bar is created only when the window contains at least
+one tick.
 
 ## JSON Schema
 
 The listed types are Rust types. In JSON, every `i64`, `u64`, `i128`, and
 `u128` is an exact base-10 string, including elements of arrays of `u64`.
 `u8`, `u16`, and `u32` remain JSON numbers. Rust `String` values are JSON
-strings; vectors are arrays. This is schema version 3 and intentionally avoids
+strings; vectors are arrays. This is schema version 4 and intentionally avoids
 precision loss in JavaScript and other binary64-based consumers.
 
 ```text
-Bar1m
+Bar
 ├── schema_version              u16
 ├── timestamp                   u64
 ├── source                      String
 ├── symbol                      String
+├── timeframe                   String (configured worker timeframe)
 ├── revision                    u64
 ├── bar_key                     String
 ├── header
@@ -147,7 +152,7 @@ Bar1m
 │   ├── sum_interarrival         u128
 │   ├── sum_interarrival_sq      u128
 │   ├── interarrival_count       u64
-│   ├── active_seconds           u8
+│   ├── active_seconds           u32
 │   └── activity_profile         u32[60]
 ├── distributions
 │   ├── trade_size_hist          u64[16]
@@ -198,11 +203,13 @@ Bar1m
 
 ## JSON envelope, identity, and versioning
 
-- `event_id` is not a `Bar1m` field. It is in the Pulsar envelope beside
-  `event_type`, `timestamp`, `source`, `symbol`, `revision`, and `data`.
+- `event_id` is not a bar field. It is in the Pulsar envelope beside
+  `event_type`, `timestamp`, `source`, `symbol`, `timeframe`, `revision`, and
+  `data`.
+  `event_type` is `bar.{timeframe}`.
   Envelope `timestamp` and `revision` are JSON decimal strings, like the
-  corresponding fields in `Bar1m`.
-- `bar_key` is `"{source}/{symbol}/{timestamp_ms}"`. `event_id` is
+  corresponding fields in the bar.
+- `bar_key` is `"{source}/{symbol}/{timeframe}/{timestamp_ms}"`. `event_id` is
   `"{bar_key}:r{revision}"`. Revision starts at 1 and increments when a
   recomputed bar changes.
 - The root `schema_version` and `timestamp` are authoritative. The same values
@@ -222,21 +229,27 @@ Bar1m
   only when every ID parses as `u64`. Rust's `u64` parser accepts a leading
   plus sign (for example, `"+5"` parses as 5); the original text is retained
   and breaks ties between numerically equal IDs.
-- `source_id` and `symbol_id` come from separate persistent registries in
-  `AGGREGATOR_ID_REGISTRY`, assigned from the first available positive ID.
+- `source_id` and `symbol_id` come from separate persistent registries in the
+  timeframe-specific path derived from `AGGREGATOR_ID_REGISTRY`, assigned from
+  the first available positive ID.
   Preserve/share that registry to keep the mappings stable. `aggregation_level`
-  is 1 for one-minute bars; `price_scale` and `quantity_scale` are decimal
-  exponents, both 8; `time_unit=1` means milliseconds.
+  is 1 for direct aggregation from ticks; `price_scale` and `quantity_scale`
+  are decimal exponents, both 8; `time_unit=1` means milliseconds.
 
 ## Metric and flag conventions
 
 - Input `price` and `qty` are integer values scaled by `10^8`; notional is
   their integer product. All price-change fields are integer price changes,
-  not percentage returns. The v3 field names use “change” to make this explicit.
+  not percentage returns. The field names use “change” to make this explicit.
 - `buy_trade_ratio` and `sell_trade_ratio` are trade-count fractions multiplied
   by `10^8`, computed over known-side trades; both are zero if there are none.
-  `trade_intensity` is `n_trades * 10^8 / active_seconds`, where
-  `active_seconds` counts occupied one-second buckets. `price_efficiency` is
+  The 60 `activity_profile` entries are equal-duration slices of the bar. For a
+  `1m` bar these are one-second slices; for longer timeframes each slice spans
+  the same fraction of that timeframe. `active_seconds` independently counts
+  distinct UTC one-second intervals containing at least one tick, regardless of
+  timeframe.
+  `trade_intensity` is `n_trades * 10^8 / active_seconds`.
+  `price_efficiency` is
   `(close - open) * 10^8 / sum(abs(consecutive price changes))`, or zero when
   the denominator is zero.
 - `is_buyer_maker=0` contributes to buy flow and `=1` to sell flow. Other
@@ -272,7 +285,7 @@ Bar1m
   positive and negative price changes respectively. They are not the
   components of `realized_variance`, which is the sum of squared price changes.
   High-order moments use exact decimal strings because they can exceed 128 bits;
-  other wide integer values are also strings in v3 for JSON consumer safety.
+  other wide integer values are also strings in v4 for JSON consumer safety.
 - `trade_imbalance`, `volume_imbalance`, and `notional_imbalance` are signed
   buy-minus-sell differences for trade count, quantity, and notional. They are
   not absolute values. `vwap` is `total_notional / total_qty`; `mean_size` and

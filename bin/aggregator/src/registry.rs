@@ -43,6 +43,23 @@ impl IdRegistry {
         Ok(registry)
     }
 
+    pub fn load_for_timeframe(path: PathBuf, timeframe: &str) -> Result<Self> {
+        if timeframe == "1m" {
+            return Self::load(path);
+        }
+
+        let file_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .context("ID registry filename is not valid UTF-8")?;
+        let extension = path.extension().and_then(|extension| extension.to_str());
+        let timeframe_file = match extension {
+            Some(extension) => format!("{file_name}-{timeframe}.{extension}"),
+            None => format!("{file_name}-{timeframe}"),
+        };
+        Self::load(path.with_file_name(timeframe_file))
+    }
+
     pub fn ids_for(&mut self, source: &str, symbol: &str) -> Result<(u8, u16)> {
         let mut changed = false;
         let source_id = match self.sources.get(source) {
@@ -132,5 +149,21 @@ mod tests {
         let mut reloaded = IdRegistry::load(path.clone()).unwrap();
         assert_eq!(reloaded.ids_for("binance", "BTCUSDT").unwrap(), first);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn timeframe_registry_paths_are_isolated_without_moving_the_1m_registry() {
+        let path = std::path::PathBuf::from("/tmp/aggregator-ids.json");
+        let one_minute = IdRegistry::load_for_timeframe(path.clone(), "1m").unwrap();
+        let five_minutes = IdRegistry::load_for_timeframe(path, "5m").unwrap();
+
+        assert_eq!(
+            one_minute.path,
+            std::path::PathBuf::from("/tmp/aggregator-ids.json")
+        );
+        assert_eq!(
+            five_minutes.path,
+            std::path::PathBuf::from("/tmp/aggregator-ids-5m.json")
+        );
     }
 }

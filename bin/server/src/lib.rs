@@ -14,6 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 pub mod handlers;
+pub mod market;
 pub mod models;
 pub mod routes;
 pub mod server;

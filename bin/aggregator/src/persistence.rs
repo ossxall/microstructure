@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::model::{Bar1m, Tick, decimal_string};
+use crate::model::{Bar, Tick, decimal_string};
 use anyhow::{Context, Result, ensure};
 use questdb::{
     QuestDb,
@@ -37,6 +37,7 @@ pub struct PendingEvent {
     pub event_id: String,
     pub source: String,
     pub symbol: String,
+    pub timeframe: String,
     pub revision: u64,
     pub payload: String,
 }
@@ -46,14 +47,15 @@ pub const STATE_KEY: &str = "minute-cursor";
 #[derive(Debug, Serialize)]
 pub struct BarEvent<'a> {
     pub event_id: &'a str,
-    pub event_type: &'static str,
+    pub event_type: &'a str,
     #[serde(serialize_with = "decimal_string::serialize")]
     pub timestamp: u64,
     pub source: &'a str,
     pub symbol: &'a str,
+    pub timeframe: &'a str,
     #[serde(serialize_with = "decimal_string::serialize")]
     pub revision: u64,
-    pub data: &'a Bar1m,
+    pub data: &'a Bar,
 }
 
 impl PendingEvent {
@@ -66,11 +68,15 @@ pub fn connect(connect_string: &str) -> Result<QuestDb> {
     QuestDb::connect(connect_string).context("Failed to connect to QuestDB")
 }
 
-pub fn ensure_schema(db: &QuestDb) -> Result<()> {
+pub fn ensure_schema(db: &QuestDb, timeframe: &str) -> Result<()> {
     let mut reader = db
         .borrow_reader()
         .context("Failed to open QuestDB schema connection")?;
-    for statement in CREATE_SCHEMA
+    let schema = CREATE_SCHEMA
+        .replace("{bars_table}", &bars_table_name(timeframe))
+        .replace("{event_table}", &event_table_name(timeframe))
+        .replace("{state_table}", &state_table_name(timeframe));
+    for statement in schema
         .split(';')
         .map(str::trim)
         .filter(|statement| !statement.is_empty())
@@ -103,7 +109,7 @@ pub fn load_ticks(db: &QuestDb, start_us: i64, end_us: i64) -> Result<Vec<Tick>>
         .bind_timestamp_micros(start_us)
         .bind_timestamp_micros(end_us)
         .execute()
-        .context("Failed to query ticks for minute bucket")?;
+        .context("Failed to query ticks for timeframe bucket")?;
 
     let mut ticks = Vec::new();
     while let Some(batch) = cursor
@@ -203,15 +209,16 @@ fn read_timestamp_scalar(db: &QuestDb, sql: &str) -> Result<Option<i64>> {
     Ok(result)
 }
 
-pub fn read_cursor_ms(db: &QuestDb) -> Result<Option<u64>> {
+pub fn read_cursor_ms(db: &QuestDb, timeframe: &str) -> Result<Option<u64>> {
+    let table = state_table_name(timeframe);
     let mut reader = db
         .borrow_reader()
         .context("Failed to open QuestDB cursor reader")?;
     let mut cursor = reader
-        .execute(
-            "SELECT cursor_ms FROM aggregator_state \
-             WHERE state_key = 'minute-cursor' ORDER BY time DESC LIMIT 1",
-        )
+        .execute(format!(
+            "SELECT cursor_ms FROM {table} \
+             WHERE state_key = 'minute-cursor' ORDER BY time DESC LIMIT 1"
+        ))
         .context("Failed to query aggregator cursor")?;
     let mut result = None;
     while let Some(batch) = cursor
@@ -232,7 +239,7 @@ pub fn read_cursor_ms(db: &QuestDb) -> Result<Option<u64>> {
     Ok(result)
 }
 
-pub fn persist_cursor(db: &QuestDb, next_minute_ms: u64) -> Result<()> {
+pub fn persist_cursor(db: &QuestDb, timeframe: &str, next_minute_ms: u64) -> Result<()> {
     let cursor_time_us = next_minute_ms
         .checked_mul(1_000)
         .context("Aggregator cursor timestamp overflows")?;
@@ -242,8 +249,9 @@ pub fn persist_cursor(db: &QuestDb, next_minute_ms: u64) -> Result<()> {
         .borrow_sender()
         .context("Failed to borrow QuestDB cursor sender")?;
     let mut buffer = sender.new_buffer();
+    let table = state_table_name(timeframe);
     buffer
-        .table("aggregator_state")?
+        .table(table.as_str())?
         .symbol("state_key", STATE_KEY)?
         .column_i64("cursor_ms", i64::try_from(next_minute_ms)?)?
         .at(TimestampMicros::new(cursor_time_us))?;
@@ -254,13 +262,17 @@ pub fn persist_cursor(db: &QuestDb, next_minute_ms: u64) -> Result<()> {
 
 pub fn existing_bars(
     db: &QuestDb,
+    timeframe: &str,
     time_us: i64,
 ) -> Result<BTreeMap<(String, String), ExistingBar>> {
+    let table = bars_table_name(timeframe);
     let mut reader = db
         .borrow_reader()
         .context("Failed to open QuestDB bar reader")?;
     let mut cursor = reader
-        .prepare("SELECT source, symbol, revision, payload FROM bars_1m WHERE time = $1")
+        .prepare(format!(
+            "SELECT source, symbol, revision, payload FROM {table} WHERE time = $1"
+        ))
         .bind_timestamp_micros(time_us)
         .execute()
         .context("Failed to query existing minute bars")?;
@@ -271,19 +283,19 @@ pub fn existing_bars(
     {
         let sources = match batch.column(0)? {
             ColumnView::Symbol(column) => column,
-            _ => anyhow::bail!("QuestDB bars_1m.source is not SYMBOL"),
+            _ => anyhow::bail!("QuestDB bar source is not SYMBOL"),
         };
         let symbols = match batch.column(1)? {
             ColumnView::Symbol(column) => column,
-            _ => anyhow::bail!("QuestDB bars_1m.symbol is not SYMBOL"),
+            _ => anyhow::bail!("QuestDB bar symbol is not SYMBOL"),
         };
         let revisions = match batch.column(2)? {
             ColumnView::Long(column) => column,
-            _ => anyhow::bail!("QuestDB bars_1m.revision is not LONG"),
+            _ => anyhow::bail!("QuestDB bar revision is not LONG"),
         };
         let payloads = match batch.column(3)? {
             ColumnView::Varchar(column) => column,
-            _ => anyhow::bail!("QuestDB bars_1m.payload is not VARCHAR"),
+            _ => anyhow::bail!("QuestDB bar payload is not VARCHAR"),
         };
         for row in 0..batch.row_count() {
             bars.insert(
@@ -304,7 +316,7 @@ pub fn existing_bars(
     Ok(bars)
 }
 
-pub fn persist_bar(db: &QuestDb, bar: &Bar1m, event_id: &str) -> Result<()> {
+pub fn persist_bar(db: &QuestDb, timeframe: &str, bar: &Bar, event_id: &str) -> Result<()> {
     let time_us = bar
         .timestamp
         .checked_mul(1_000)
@@ -314,9 +326,10 @@ pub fn persist_bar(db: &QuestDb, bar: &Bar1m, event_id: &str) -> Result<()> {
         .borrow_sender()
         .context("Failed to borrow QuestDB sender")?;
     let mut buffer = sender.new_buffer();
+    let table = bars_table_name(timeframe);
 
     buffer
-        .table("bars_1m")?
+        .table(table.as_str())?
         .symbol("source", bar.source.as_str())?
         .symbol("symbol", bar.symbol.as_str())?
         .column_i64("revision", i64::try_from(bar.revision)?)?
@@ -331,7 +344,8 @@ pub fn persist_bar(db: &QuestDb, bar: &Bar1m, event_id: &str) -> Result<()> {
 
 pub fn persist_pending_event(
     db: &QuestDb,
-    bar: &Bar1m,
+    timeframe: &str,
+    bar: &Bar,
     event_id: &str,
     event_payload: &str,
 ) -> Result<()> {
@@ -344,8 +358,9 @@ pub fn persist_pending_event(
         .borrow_sender()
         .context("Failed to borrow QuestDB outbox sender")?;
     let mut buffer = sender.new_buffer();
+    let table = event_table_name(timeframe);
     buffer
-        .table("bar_events")?
+        .table(table.as_str())?
         .column_str("event_id", event_id)?
         .symbol("source", bar.source.as_str())?
         .symbol("symbol", bar.symbol.as_str())?
@@ -359,12 +374,20 @@ pub fn persist_pending_event(
         .context("QuestDB did not durably acknowledge the bar outbox event")
 }
 
-pub fn outbox_event_exists(db: &QuestDb, time_us: i64, event_id: &str) -> Result<bool> {
+pub fn outbox_event_exists(
+    db: &QuestDb,
+    timeframe: &str,
+    time_us: i64,
+    event_id: &str,
+) -> Result<bool> {
+    let table = event_table_name(timeframe);
     let mut reader = db
         .borrow_reader()
         .context("Failed to open QuestDB outbox lookup reader")?;
     let mut cursor = reader
-        .prepare("SELECT event_id FROM bar_events WHERE time = $1 AND event_id = $2 LIMIT 1")
+        .prepare(format!(
+            "SELECT event_id FROM {table} WHERE time = $1 AND event_id = $2 LIMIT 1"
+        ))
         .bind_timestamp_micros(time_us)
         .bind_varchar(event_id)
         .execute()
@@ -380,15 +403,16 @@ pub fn outbox_event_exists(db: &QuestDb, time_us: i64, event_id: &str) -> Result
     Ok(false)
 }
 
-pub fn pending_events(db: &QuestDb) -> Result<Vec<PendingEvent>> {
+pub fn pending_events(db: &QuestDb, timeframe: &str) -> Result<Vec<PendingEvent>> {
+    let table = event_table_name(timeframe);
     let mut reader = db
         .borrow_reader()
         .context("Failed to open QuestDB event outbox reader")?;
     let mut cursor = reader
-        .execute(
+        .execute(format!(
             "SELECT time, event_id, source, symbol, revision, payload \
-             FROM bar_events WHERE published = false ORDER BY time, event_id",
-        )
+             FROM {table} WHERE published = false ORDER BY time, event_id"
+        ))
         .context("Failed to query pending bar events")?;
     let mut events = Vec::new();
     while let Some(batch) = cursor
@@ -397,27 +421,27 @@ pub fn pending_events(db: &QuestDb) -> Result<Vec<PendingEvent>> {
     {
         let times = match batch.column(0)? {
             ColumnView::Timestamp(column) => column,
-            _ => anyhow::bail!("QuestDB bar_events.time is not TIMESTAMP"),
+            _ => anyhow::bail!("QuestDB outbox time is not TIMESTAMP"),
         };
         let event_ids = match batch.column(1)? {
             ColumnView::Varchar(column) => column,
-            _ => anyhow::bail!("QuestDB bar_events.event_id is not VARCHAR"),
+            _ => anyhow::bail!("QuestDB outbox event_id is not VARCHAR"),
         };
         let sources = match batch.column(2)? {
             ColumnView::Symbol(column) => column,
-            _ => anyhow::bail!("QuestDB bar_events.source is not SYMBOL"),
+            _ => anyhow::bail!("QuestDB outbox source is not SYMBOL"),
         };
         let symbols = match batch.column(3)? {
             ColumnView::Symbol(column) => column,
-            _ => anyhow::bail!("QuestDB bar_events.symbol is not SYMBOL"),
+            _ => anyhow::bail!("QuestDB outbox symbol is not SYMBOL"),
         };
         let revisions = match batch.column(4)? {
             ColumnView::Long(column) => column,
-            _ => anyhow::bail!("QuestDB bar_events.revision is not LONG"),
+            _ => anyhow::bail!("QuestDB outbox revision is not LONG"),
         };
         let payloads = match batch.column(5)? {
             ColumnView::Varchar(column) => column,
-            _ => anyhow::bail!("QuestDB bar_events.payload is not VARCHAR"),
+            _ => anyhow::bail!("QuestDB outbox payload is not VARCHAR"),
         };
         for row in 0..batch.row_count() {
             events.push(PendingEvent {
@@ -434,6 +458,7 @@ pub fn pending_events(db: &QuestDb) -> Result<Vec<PendingEvent>> {
                     .resolve(row)
                     .context("Outbox symbol is null")?
                     .to_string(),
+                timeframe: timeframe.to_string(),
                 revision: u64::try_from(revisions.value(row))?,
                 payload: payloads
                     .value(row)
@@ -445,13 +470,14 @@ pub fn pending_events(db: &QuestDb) -> Result<Vec<PendingEvent>> {
     Ok(events)
 }
 
-pub fn mark_event_published(db: &QuestDb, event: &PendingEvent) -> Result<()> {
+pub fn mark_event_published(db: &QuestDb, timeframe: &str, event: &PendingEvent) -> Result<()> {
     let mut sender = db
         .borrow_sender()
         .context("Failed to borrow QuestDB outbox sender")?;
     let mut buffer = sender.new_buffer();
+    let table = event_table_name(timeframe);
     buffer
-        .table("bar_events")?
+        .table(table.as_str())?
         .column_str("event_id", event.event_id.as_str())?
         .symbol("source", event.source.as_str())?
         .symbol("symbol", event.symbol.as_str())?
@@ -462,4 +488,40 @@ pub fn mark_event_published(db: &QuestDb, event: &PendingEvent) -> Result<()> {
     sender
         .flush_buffer_and_wait(&mut buffer, AckLevel::LocalDurable)
         .context("QuestDB did not durably mark bar event as published")
+}
+
+fn bars_table_name(timeframe: &str) -> String {
+    format!("bars_{timeframe}")
+}
+
+fn event_table_name(timeframe: &str) -> String {
+    if timeframe == "1m" {
+        "bar_events".to_string()
+    } else {
+        format!("bar_events_{timeframe}")
+    }
+}
+
+fn state_table_name(timeframe: &str) -> String {
+    if timeframe == "1m" {
+        "aggregator_state".to_string()
+    } else {
+        format!("aggregator_state_{timeframe}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bars_table_name, event_table_name, state_table_name};
+
+    #[test]
+    fn each_timeframe_gets_separate_persistence_tables() {
+        assert_eq!(bars_table_name("1m"), "bars_1m");
+        assert_eq!(event_table_name("1m"), "bar_events");
+        assert_eq!(state_table_name("1m"), "aggregator_state");
+
+        assert_eq!(bars_table_name("5m"), "bars_5m");
+        assert_eq!(event_table_name("5m"), "bar_events_5m");
+        assert_eq!(state_table_name("5m"), "aggregator_state_5m");
+    }
 }

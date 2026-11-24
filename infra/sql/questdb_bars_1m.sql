@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS bars_1m (
+CREATE TABLE IF NOT EXISTS {bars_table} (
     time TIMESTAMP,
     source SYMBOL,
     symbol SYMBOL,
@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS bars_1m (
 PARTITION BY DAY
 DEDUP UPSERT KEYS (time, source, symbol);
 
-CREATE TABLE IF NOT EXISTS bar_events (
+CREATE TABLE IF NOT EXISTS {event_table} (
     time TIMESTAMP,
     event_id VARCHAR,
     source SYMBOL,
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS bar_events (
 PARTITION BY DAY
 DEDUP UPSERT KEYS (time, event_id);
 
-CREATE TABLE IF NOT EXISTS aggregator_state (
+CREATE TABLE IF NOT EXISTS {state_table} (
     time TIMESTAMP,
     state_key SYMBOL,
     cursor_ms LONG

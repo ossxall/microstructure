@@ -13,7 +13,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::state::AppState;
+use crate::{
+    market::{DEFAULT_TIMEFRAME, topic_name},
+    state::AppState,
+};
 use axum::{
     extract::{
         State,
@@ -26,23 +29,28 @@ use pulsar::{Consumer, ConsumerOptions, SubType, TokioExecutor, consumer::Initia
 use serde::Deserialize;
 use tracing::{error, info};
 
-const BARS_1M_TOPIC: &str = "persistent://public/default/bars-1m";
-
 //----------------------------------------------------------------------------------------------------------------------
 // WEB SOCKET IMPLEMENTATION
 //----------------------------------------------------------------------------------------------------------------------
+
+fn default_timeframe() -> String {
+    DEFAULT_TIMEFRAME.to_string()
+}
 
 #[derive(Debug, Deserialize)]
 struct WsCommand {
     action: String,
     source: String,
     symbol: String,
+    #[serde(default = "default_timeframe")]
+    timeframe: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct BarEventIdentity {
     source: String,
     symbol: String,
+    timeframe: String,
 }
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
@@ -58,7 +66,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     let mut consumer: Option<Consumer<Vec<u8>, TokioExecutor>> = None;
 
-    let mut current_subscription: Option<(String, String)> = None;
+    let mut current_subscription: Option<(String, String, String)> = None;
 
     loop {
         tokio::select! {
@@ -77,20 +85,40 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         continue;
                     };
 
-                    let subscription = (cmd.source.clone(), cmd.symbol.clone());
-
                     // Handle a subscription request from the client.
                     if cmd.action == "subscribe" {
+                        let Some(topic) = topic_name(
+                            &state.pulsar_namespace,
+                            &cmd.source,
+                            &cmd.symbol,
+                            &cmd.timeframe,
+                        ) else {
+                            let _ = socket
+                                .send(Message::Text(
+                                    serde_json::json!({
+                                        "type": "error",
+                                        "message": "The source, symbol, or timeframe is invalid."
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ))
+                                .await;
+                            continue;
+                        };
+                        let subscription = (
+                            cmd.source.clone(),
+                            cmd.symbol.clone(),
+                            cmd.timeframe.clone(),
+                        );
                         if current_subscription.as_ref() == Some(&subscription) {
                             continue;
                         }
                         unsubscribe_consumer(&mut consumer).await;
 
-                        // Every client consumes the shared 1-minute bar topic.
                         match state
                             .pulsar
                             .consumer()
-                            .with_topic(BARS_1M_TOPIC.to_string())
+                            .with_topic(topic.clone())
                             .with_subscription_type(SubType::Exclusive)
                             .with_subscription(
                                 format!("ui-{}", uuid::Uuid::now_v7())
@@ -109,8 +137,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                 info!(
                                     source = %cmd.source,
                                     symbol = %cmd.symbol,
-                                    topic = BARS_1M_TOPIC,
-                                    "Subscribed to 1-minute bars"
+                                    timeframe = %cmd.timeframe,
+                                    topic = %topic,
+                                    "Subscribed to bars"
                                 );
                             }
 
@@ -154,10 +183,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
                     Some(Ok(mut msg)) => {
                         let should_forward = current_subscription.as_ref().is_some_and(
-                            |(source, symbol)| {
+                            |(source, symbol, timeframe)| {
                                 serde_json::from_slice::<BarEventIdentity>(&msg.payload.data)
                                     .is_ok_and(|event| {
-                                        event.source == *source && event.symbol == *symbol
+                                        event.source == *source
+                                            && event.symbol == *symbol
+                                            && event.timeframe == *timeframe
                                     })
                             },
                         );
@@ -209,5 +240,19 @@ async fn unsubscribe_consumer(consumer: &mut Option<Consumer<Vec<u8>, TokioExecu
         && let Err(err) = consumer.unsubscribe().await
     {
         error!("Failed to unsubscribe from Pulsar bar events: {:?}", err);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WsCommand;
+
+    #[test]
+    fn websocket_subscriptions_default_to_one_minute() {
+        let command: WsCommand =
+            serde_json::from_str(r#"{"action":"subscribe","source":"binance","symbol":"BTCUSDT"}"#)
+                .unwrap();
+
+        assert_eq!(command.timeframe, "1m");
     }
 }

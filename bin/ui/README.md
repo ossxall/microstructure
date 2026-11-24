@@ -65,9 +65,10 @@ const wasm = await loadBasicWasm()
 const result = wasm.add(2, 3) // 5
 ```
 
-La vista de chart obtiene las últimas 500 barras 1m de `POST
-/api/market/get-history`, se suscribe al WebSocket `/api/market/ws` y remuestrea
-localmente al cambiar de timeframe. El proxy HTTP usa
+La vista de chart obtiene las últimas 500 barras 1m de
+`POST /api/market/get-history` y se suscribe al WebSocket `/api/market/ws`,
+enviando `source`, `symbol` y `timeframe: "1m"` en ambas solicitudes. El chart
+remuestrea localmente al cambiar su timeframe visible. El proxy HTTP usa
 `NUXT_MARKET_SERVER_URL` (por defecto `http://localhost:3001/api/market`) y la
 URL pública del WebSocket se puede cambiar con
 `NUXT_PUBLIC_MARKET_WEBSOCKET_URL` (por defecto

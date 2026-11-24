@@ -51,7 +51,17 @@ async fn main() -> Result<()> {
             .context("Failed to connect to Pulsar")?,
     );
 
-    let state: AppState = AppState::new(Arc::new(questdb), pulsar);
+    let pulsar_namespace = std::env::var("PULSAR_NAMESPACE")
+        .unwrap_or_else(|_| "persistent://public/default".to_string());
+    anyhow::ensure!(
+        !pulsar_namespace.trim().is_empty(),
+        "PULSAR_NAMESPACE cannot be empty"
+    );
+    let state: AppState = AppState::new(
+        Arc::new(questdb),
+        pulsar,
+        pulsar_namespace.trim().trim_end_matches('/').to_string(),
+    );
 
     start_http_server(state).await;
 
