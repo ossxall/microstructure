@@ -212,6 +212,60 @@ test('excludes an in-progress bar by default and includes its final revision', (
   assert.equal(profile.snapshot().totalVolume, 20n)
 })
 
+test('accepts a finalized bar with the same revision as its live snapshot', () => {
+  const profile = new RollingDeltaProfile({ rollingWindowMinutes: 3 })
+  const live = makeBar({
+    key: 'same-revision-live',
+    isFinal: false,
+    levels: [makeLevel(10n, 20n, 0n)]
+  })
+  const final = makeBar({
+    key: 'same-revision-live',
+    isFinal: true,
+    levels: [makeLevel(10n, 40n, 0n)]
+  })
+
+  assert.equal(live.revision, final.revision)
+  assert.equal(profile.upsert(live), true)
+  assert.equal(profile.snapshot().barsInWindow, 0)
+  assert.equal(profile.upsert(final), true)
+  assert.equal(profile.snapshot().barsInWindow, 1)
+  assert.equal(profile.snapshot().totalVolume, 40n)
+  assert.equal(profile.upsert(live), false)
+  assert.equal(profile.snapshot().totalVolume, 40n)
+})
+
+test('replaces changed live snapshots at the same revision without double counting', () => {
+  const profile = new RollingDeltaProfile({
+    rollingWindowMinutes: 3,
+    includeFormingBar: true
+  })
+  const first = makeBar({
+    key: 'changing-live',
+    isFinal: false,
+    levels: [makeLevel(10n, 20n, 0n)]
+  })
+  const updated = makeBar({
+    key: 'changing-live',
+    isFinal: false,
+    levels: [makeLevel(10n, 35n, 5n)]
+  })
+  const final = makeBar({
+    key: 'changing-live',
+    isFinal: true,
+    levels: [makeLevel(10n, 40n, 10n)]
+  })
+
+  assert.equal(profile.upsert(first), true)
+  assert.equal(profile.snapshot().totalVolume, 20n)
+  assert.equal(profile.upsert(first), false)
+  assert.equal(profile.upsert(updated), true)
+  assert.equal(profile.snapshot().totalVolume, 40n)
+  assert.equal(profile.upsert(final), true)
+  assert.equal(profile.snapshot().totalVolume, 50n)
+  assert.equal(profile.activeBarCount, 1)
+})
+
 test('aggregates repeated prices, drops zero levels, and accepts an empty footprint', () => {
   const profile = new RollingDeltaProfile({ rollingWindowMinutes: 3 })
   const repeated = makeBar({
@@ -228,6 +282,27 @@ test('aggregates repeated prices, drops zero levels, and accepts an empty footpr
   assert.equal(profile.snapshot().levels[0].totalQty, 7n)
   assert.equal(profile.upsert(makeBar({ key: 'empty', minute: 1, levels: [] })), true)
   assert.equal(profile.snapshot().levels.length, 1)
+})
+
+test('allows unknown-side totals to exceed known-side footprint totals', () => {
+  const diagnostics = []
+  const profile = new RollingDeltaProfile({}, message => diagnostics.push(message))
+  const bar = makeBar({
+    key: 'unknown-side',
+    levels: [makeLevel(10n, 4n, 2n, 1, 1)]
+  })
+  const knownNotional = BigInt(bar.volume_flow.total_notional)
+  bar.identity.n_trades = 3
+  bar.identity.coverage_flags = 1 << 4
+  bar.volume_flow.total_qty = '16'
+  bar.volume_flow.total_notional = String(knownNotional + 1_000n)
+
+  assert.equal(profile.upsert(bar), true)
+  assert.equal(
+    diagnostics.some(message => message.includes('no cuadra entre footprint')),
+    false
+  )
+  assert.equal(profile.snapshot().totalVolume, 6n)
 })
 
 test('diagnoses inconsistent levels and rejects incompatible symbol and scales', () => {
@@ -292,19 +367,20 @@ test('groups prices by optional tick size without changing source quantities', (
   assert.equal(profile.snapshot().totalBuyVolume, 5n)
 })
 
-test('uses deterministic lower-price POC ties and expands Value Area from the POC', () => {
+test('uses lower-price POC ties and prefers the higher level on Value Area ties', () => {
   const profile = new RollingDeltaProfile({ rollingWindowMinutes: 1, valueAreaPercentage: 70 })
   profile.upsert(makeBar({
     levels: [
+      makeLevel(9n, 4n, 0n),
       makeLevel(10n, 10n, 0n),
-      makeLevel(20n, 10n, 0n)
+      makeLevel(11n, 4n, 0n)
     ]
   }))
 
   const result = profile.snapshot()
   assert.equal(result.pocPrice, 10 / 10 ** SCALE)
   assert.equal(result.valueAreaLow, 10 / 10 ** SCALE)
-  assert.equal(result.valueAreaHigh, 20 / 10 ** SCALE)
+  assert.equal(result.valueAreaHigh, 11 / 10 ** SCALE)
   assert.equal(result.buySellRatio, null)
   assert.equal(result.levels[0].buySellRatio, null)
 })

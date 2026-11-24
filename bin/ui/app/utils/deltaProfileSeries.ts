@@ -6,6 +6,7 @@ const MAX_RETAINED_BARS = 500
 const MAX_DIAGNOSTICS = 1_000
 const MINUTE_MS = 60_000
 const ZERO = 0n
+const COVERAGE_UNKNOWN_SIDE_VALUE = 1 << 4
 
 export type DeltaProfileScaleMode = 'linear' | 'logarithmic'
 
@@ -242,6 +243,33 @@ function validCount(value: unknown): bigint | null {
   return parsed !== null && parsed >= ZERO ? parsed : null
 }
 
+function sameLevels(left: readonly RawLevel[], right: readonly RawLevel[]): boolean {
+  return left.length === right.length && left.every((level, index) => {
+    const other = right[index]
+    return Boolean(
+      other
+      && level.price === other.price
+      && level.buyQty === other.buyQty
+      && level.sellQty === other.sellQty
+      && level.buyCount === other.buyCount
+      && level.sellCount === other.sellCount
+      && level.buyNotional === other.buyNotional
+      && level.sellNotional === other.sellNotional
+    )
+  })
+}
+
+function sameStoredContribution(left: StoredBar, right: StoredBar): boolean {
+  return left.revision === right.revision
+    && left.timestamp === right.timestamp
+    && left.source === right.source
+    && left.symbol === right.symbol
+    && left.priceScale === right.priceScale
+    && left.quantityScale === right.quantityScale
+    && left.isFinal === right.isFinal
+    && sameLevels(left.levels, right.levels)
+}
+
 /**
  * Maintains the rolling aggregate independently of the chart timeframe.
  *
@@ -327,7 +355,8 @@ export class RollingDeltaProfile {
   }
 
   /**
-   * Inserts, ignores, or replaces a 1m bar according to bar_key and revision.
+   * Upserts a 1m bar by key/revision while allowing live updates and finality
+   * transitions that can legitimately share the same revision.
    */
   upsert(bar: Bar): boolean {
     const parsed = this.parseBar(bar)
@@ -370,8 +399,26 @@ export class RollingDeltaProfile {
 
     const current = this.bars.get(parsed.key)
 
-    if (current && parsed.revision <= current.revision) {
-      return false
+    if (current) {
+      // A finalized bar is terminal for this timestamp; a delayed live event
+      // must never roll the profile back, even if it carries a larger revision.
+      if (current.isFinal && !parsed.isFinal) {
+        return false
+      }
+
+      if (parsed.revision < current.revision) {
+        return false
+      }
+
+      if (
+        parsed.revision === current.revision
+        && (
+          current.isFinal
+          || sameStoredContribution(current, parsed)
+        )
+      ) {
+        return false
+      }
     }
 
     if (!this.symbol) {
@@ -724,33 +771,51 @@ export class RollingDeltaProfile {
         sellCount: ZERO
       }
     )
+    const coverageFlags = integer(bar.identity?.coverage_flags)
+    const hasUnknownSide = coverageFlags !== null
+      && (coverageFlags & BigInt(COVERAGE_UNKNOWN_SIDE_VALUE)) !== ZERO
+
     if (flow) {
-      const expected: Array<[string, unknown, bigint]> = [
+      const expected: Array<[string, unknown, bigint, boolean?]> = [
         ['buy_qty', flow.buy_qty, sums.buy],
         ['sell_qty', flow.sell_qty, sums.sell],
-        ['total_qty', flow.total_qty, sums.buy + sums.sell],
+        ['total_qty', flow.total_qty, sums.buy + sums.sell, hasUnknownSide],
         ['signed_qty', flow.signed_qty, sums.buy - sums.sell],
         ['buy_notional', flow.buy_notional, sums.buyNotional],
         ['sell_notional', flow.sell_notional, sums.sellNotional],
-        ['total_notional', flow.total_notional, sums.buyNotional + sums.sellNotional],
+        [
+          'total_notional',
+          flow.total_notional,
+          sums.buyNotional + sums.sellNotional,
+          hasUnknownSide
+        ],
         ['signed_notional', flow.signed_notional, sums.buyNotional - sums.sellNotional],
         ['buy_count', flow.buy_count, sums.buyCount],
         ['sell_count', flow.sell_count, sums.sellCount]
       ]
 
-      for (const [name, value, actual] of expected) {
+      for (const [name, value, actual, mayIncludeUnknownSide] of expected) {
         const supplied = integer(value)
-        if (supplied !== null && supplied !== actual) {
+        const inconsistent = supplied !== null && (
+          mayIncludeUnknownSide ? supplied < actual : supplied !== actual
+        )
+        if (inconsistent) {
           this.diagnose(
             `flow:${key}:${revision}:${name}`,
-            `La Bar ${key} no cuadra entre footprint y volume_flow.${name}; se conserva footprint como fuente del perfil.`
+            mayIncludeUnknownSide
+              ? `La Bar ${key} declara volume_flow.${name} menor que el volumen de lado conocido del footprint; se conserva footprint como fuente del perfil.`
+              : `La Bar ${key} no cuadra entre footprint y volume_flow.${name}; se conserva footprint como fuente del perfil.`
           )
         }
       }
     }
 
     const tradeCount = integer(bar.identity?.n_trades)
-    if (tradeCount !== null && tradeCount !== sums.buyCount + sums.sellCount) {
+    const knownSideCount = sums.buyCount + sums.sellCount
+    const inconsistentTradeCount = tradeCount !== null && (
+      hasUnknownSide ? tradeCount < knownSideCount : tradeCount !== knownSideCount
+    )
+    if (inconsistentTradeCount) {
       this.diagnose(
         `trade-count:${key}:${revision}`,
         `La Bar ${key} no cuadra entre footprint y identity.n_trades; se conserva footprint como fuente del perfil.`
@@ -822,7 +887,7 @@ export class RollingDeltaProfile {
 
     for (const [key, current] of this.activeBars) {
       const next = nextActive.get(key)
-      if (!next || next.revision !== current.revision) {
+      if (!next || !sameStoredContribution(current, next)) {
         this.applyBar(current, -1)
         this.activeBars.delete(key)
       }
@@ -830,7 +895,7 @@ export class RollingDeltaProfile {
 
     for (const [key, next] of nextActive) {
       const current = this.activeBars.get(key)
-      if (!current || current.revision !== next.revision) {
+      if (!current || !sameStoredContribution(current, next)) {
         this.applyBar(next, 1)
         this.activeBars.set(key, next)
       }
@@ -923,7 +988,7 @@ export class RollingDeltaProfile {
       const lower = lowIndex > 0 ? levels[lowIndex - 1] : undefined
       const upper = highIndex < levels.length - 1 ? levels[highIndex + 1] : undefined
 
-      if (lower && (!upper || lower.totalQty >= upper.totalQty)) {
+      if (lower && (!upper || lower.totalQty > upper.totalQty)) {
         lowIndex--
         included += lower.totalQty
       } else if (upper) {
