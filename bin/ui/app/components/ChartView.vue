@@ -94,6 +94,9 @@ const flowCandleStyle = ref<FlowCandleStyle>('CANDLE')
 const bidAskFlowCandleCount = ref(0)
 const showAttackBubbles = ref(true)
 const attackBubbleCount = ref(0)
+const attackMinDominancePercent = ref(25)
+const attackMinRelativeVolume = ref(1.25)
+const attackBaselineBars = ref(20)
 const canApply = computed(() => {
   return !isLoading.value && (
     draftSource.value !== source.value
@@ -266,6 +269,32 @@ function toggleAttackBubbles() {
   attackBubbleSeries?.setVisible(showAttackBubbles.value)
 }
 
+function applyAttackBubbleSettings() {
+  const dominance = numberValue(attackMinDominancePercent.value)
+  const relativeVolume = numberValue(attackMinRelativeVolume.value)
+  const baselineBars = numberValue(attackBaselineBars.value)
+
+  attackMinDominancePercent.value = Math.min(
+    80,
+    Math.max(10, Number.isFinite(dominance) ? dominance : 25)
+  )
+  attackMinRelativeVolume.value = Math.min(
+    3,
+    Math.max(1, Number.isFinite(relativeVolume) ? relativeVolume : 1.25)
+  )
+  attackBaselineBars.value = Math.min(
+    50,
+    Math.max(5, Math.round(Number.isFinite(baselineBars) ? baselineBars : 20))
+  )
+
+  attackBubbleSeries?.setParams({
+    minDominance: attackMinDominancePercent.value / 100,
+    minRelativeVolume: attackMinRelativeVolume.value,
+    baselineBars: attackBaselineBars.value
+  })
+  refreshAttackBubbleCount()
+}
+
 function updateLatestBarState() {
   let latest: Bar | undefined
   for (const bar of bars.values()) {
@@ -293,6 +322,7 @@ function replaceSeries() {
   deltaProfileSeries = chart.api.addSeries(createDeltaProfileSeries(deltaProfile))
   attackBubbleSeries = chart.api.addSeries(createAttackBubbleSeries())
   attackBubbleSeries.setVisible(showAttackBubbles.value)
+  applyAttackBubbleSettings()
 }
 
 function replaceDeltaCandleSeries() {
@@ -1237,6 +1267,82 @@ onBeforeUnmount(() => {
           </div>
         </form>
       </details>
+
+      <details
+        open
+        class="rounded-xl border border-default bg-elevated/20 p-3"
+      >
+        <summary class="cursor-pointer text-sm font-semibold text-highlighted">
+          ATAQUES ALCISTA/BAJISTA
+          <span class="ml-2 text-xs font-normal text-muted">
+            {{ attackBubbleCount }} señales · flujo agresor + confirmación de precio
+          </span>
+        </summary>
+
+        <form
+          class="mt-4 flex flex-col gap-4"
+          @submit.prevent="applyAttackBubbleSettings"
+        >
+          <div class="flex flex-wrap items-end gap-3">
+            <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
+              Dominancia mínima (%)
+              <input
+                v-model.number="attackMinDominancePercent"
+                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                type="number"
+                min="10"
+                max="80"
+                step="5"
+              >
+            </label>
+
+            <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
+              Volumen relativo mínimo (×)
+              <input
+                v-model.number="attackMinRelativeVolume"
+                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                type="number"
+                min="1"
+                max="3"
+                step="0.1"
+              >
+            </label>
+
+            <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
+              Ventana de referencia (barras)
+              <input
+                v-model.number="attackBaselineBars"
+                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                type="number"
+                min="5"
+                max="50"
+                step="1"
+              >
+            </label>
+
+            <label class="flex min-h-9 items-center gap-2 pb-2 text-xs font-medium text-muted">
+              <input
+                v-model="showAttackBubbles"
+                type="checkbox"
+                @change="toggleAttackBubbles"
+              >
+              Mostrar burbujas
+            </label>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <button
+              type="submit"
+              class="min-h-9 rounded-md bg-primary px-4 text-sm font-semibold text-inverted"
+            >
+              Aplicar indicador
+            </button>
+            <span class="text-xs text-muted">
+              El precio debe cerrar en el sentido del flujo; mínimo 5 barras para establecer la referencia.
+            </span>
+          </div>
+        </form>
+      </details>
     </header>
 
     <p
@@ -1261,19 +1367,8 @@ onBeforeUnmount(() => {
         <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
           Delta Profile 1m · {{ profileSettings.rollingWindowMinutes }}m · {{ profileBarCount }} Bars
         </span>
-        <label
-          class="flex items-center gap-2"
-          title="Desequilibrio de agresores, volumen relativo y confirmación del precio"
-        >
-          <input
-            v-model="showAttackBubbles"
-            type="checkbox"
-            @change="toggleAttackBubbles"
-          >
-          Ataques {{ attackBubbleCount }}
-        </label>
-        <span class="text-muted">
-          Desequilibrio agresor + expansión de volumen + cierre confirmatorio
+        <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
+          Ataques · {{ attackBubbleCount }}
         </span>
         <span
           v-if="latestBarState !== 'none'"
