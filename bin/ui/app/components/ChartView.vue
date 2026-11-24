@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, computed } from 'vue'
+import { onBeforeUnmount, onMounted, ref, computed, reactive } from 'vue'
 import { createChart } from '~/packages/open-charts/src'
 import type { AnyChartSeries, ChartEngine } from '~/packages/open-charts/src/core/types'
 import type { Bar } from '~/utils/bar'
 import { createOhlcvSeries } from '~/utils/ohlcvSeries'
+import {
+  createDeltaProfileSeries,
+  deltaProfileDefaults,
+  RollingDeltaProfile
+} from '~/utils/deltaProfileSeries'
 
 type MarketSource = 'binance' | 'dydx'
 type Timeframe = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d'
@@ -17,6 +22,7 @@ interface HistoryResponse {
 }
 
 const HISTORY_LIMIT = 500
+const DELTA_PROFILE_TIMEFRAME = '1m'
 const sourceOptions: { label: string, value: MarketSource }[] = [
   { label: 'Binance', value: 'binance' },
   { label: 'dYdX', value: 'dydx' }
@@ -31,6 +37,18 @@ const timeframeOptions: { label: string, value: Timeframe }[] = [
   { label: '4h', value: '4h' },
   { label: '1d', value: '1d' }
 ]
+const rollingWindowOptions = [
+  { label: '1 minuto', value: '1' },
+  { label: '3 minutos', value: '3' },
+  { label: '5 minutos', value: '5' },
+  { label: '10 minutos', value: '10' },
+  { label: '15 minutos', value: '15' },
+  { label: '30 minutos', value: '30' },
+  { label: '60 minutos', value: '60' },
+  { label: '120 minutos', value: '120' },
+  { label: '240 minutos', value: '240' },
+  { label: 'Personalizado', value: 'custom' }
+]
 
 const chartHost = ref<HTMLElement | null>(null)
 const source = ref<MarketSource>('binance')
@@ -44,6 +62,11 @@ const errorMessage = ref('')
 const socketStatus = ref<'connecting' | 'connected' | 'disconnected' | 'error'>('disconnected')
 const barCount = ref(0)
 const latestBarState = ref<'live' | 'final' | 'none'>('none')
+const profileSettings = reactive(deltaProfileDefaults())
+const profileWindowPreset = ref('15')
+const customProfileWindow = ref(15)
+const profileBarCount = ref(0)
+const profileDiagnostic = ref('')
 const canApply = computed(() => {
   return !isLoading.value && (
     draftSource.value !== source.value
@@ -54,10 +77,17 @@ const canApply = computed(() => {
 
 const config = useRuntimeConfig()
 const bars = new Map<number, Bar>()
+const deltaProfile = new RollingDeltaProfile(profileSettings, (message) => {
+  profileDiagnostic.value = message
+  console.warn(message)
+})
 let chart: ChartEngine | undefined
 let series: AnyChartSeries | undefined
+let deltaProfileSeries: AnyChartSeries | undefined
 let socket: WebSocket | undefined
+let profileSocket: WebSocket | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+let profileReconnectTimer: ReturnType<typeof setTimeout> | undefined
 let feedGeneration = 0
 let seriesHydrated = false
 
@@ -174,8 +204,10 @@ function replaceSeries() {
     return
   }
 
+  deltaProfileSeries?.destroy({ silent: true })
   series?.destroy({ silent: true })
   series = chart.api.addSeries(createOhlcvSeries())
+  deltaProfileSeries = chart.api.addSeries(createDeltaProfileSeries(deltaProfile))
 }
 
 function renderCurrentBars() {
@@ -188,15 +220,17 @@ function renderCurrentBars() {
   if (currentBars.length > 0) {
     // Full replacement is reserved for initial history hydration.
     series.setData(currentBars)
+    deltaProfileSeries?.setData(currentBars)
   }
 
   seriesHydrated = true
+  refreshDeltaProfile(true)
 }
 
 async function fetchMarketHistory(
   nextSource: MarketSource,
   nextSymbol: string,
-  nextTimeframe: Timeframe
+  nextTimeframe: string
 ): Promise<Bar[]> {
   const response = await $fetch<HistoryResponse>('/api/market/get-history', {
     method: 'POST',
@@ -215,6 +249,147 @@ async function fetchMarketHistory(
   return (response.data?.history ?? [])
     .map(parseMarketBar)
     .filter((bar): bar is Bar => bar !== null)
+}
+
+function refreshDeltaProfile(force = false) {
+  profileBarCount.value = deltaProfile.activeBarCount
+
+  if (!force && !profileSettings.autoUpdate) {
+    return
+  }
+
+  if (chart) {
+    chart.dirty = true
+    chart.overlayDirty = true
+  }
+}
+
+function upsertDeltaProfileBar(bar: Bar): boolean {
+  const changed = deltaProfile.upsert(bar)
+  if (changed) {
+    refreshDeltaProfile()
+  }
+  return changed
+}
+
+async function resyncDeltaProfileHistory(
+  nextSource: MarketSource,
+  nextSymbol: string,
+  generation: number
+) {
+  try {
+    const history = await fetchMarketHistory(
+      nextSource,
+      nextSymbol,
+      DELTA_PROFILE_TIMEFRAME
+    )
+
+    if (generation !== feedGeneration) {
+      return
+    }
+
+    history.sort((left, right) => left.time - right.time)
+    for (const bar of history) {
+      deltaProfile.upsert(bar)
+    }
+    refreshDeltaProfile()
+  } catch (error) {
+    if (generation === feedGeneration) {
+      profileDiagnostic.value = error instanceof Error
+        ? `No se pudo resincronizar el histórico 1m del Delta Profile: ${error.message}`
+        : 'No se pudo resincronizar el histórico 1m del Delta Profile'
+    }
+  }
+}
+
+function stopDeltaProfileWebSocket() {
+  if (profileReconnectTimer) {
+    clearTimeout(profileReconnectTimer)
+    profileReconnectTimer = undefined
+  }
+
+  const currentSocket = profileSocket
+  profileSocket = undefined
+  currentSocket?.close()
+}
+
+function connectDeltaProfileWebSocket(
+  nextSource: MarketSource,
+  nextSymbol: string,
+  generation: number,
+  resyncAfterConnect = false
+) {
+  if (generation !== feedGeneration) {
+    return
+  }
+
+  try {
+    const nextSocket = new WebSocket(String(config.public.marketWebSocketUrl))
+    profileSocket = nextSocket
+
+    nextSocket.addEventListener('open', () => {
+      if (profileSocket !== nextSocket || generation !== feedGeneration) {
+        return
+      }
+
+      nextSocket.send(JSON.stringify({
+        action: 'subscribe',
+        source: nextSource,
+        symbol: nextSymbol,
+        timeframe: DELTA_PROFILE_TIMEFRAME
+      }))
+    })
+
+    nextSocket.addEventListener('message', (event: MessageEvent<string>) => {
+      if (generation !== feedGeneration) {
+        return
+      }
+
+      try {
+        const message: unknown = JSON.parse(event.data)
+
+        if (
+          isRecord(message)
+          && message.type === 'subscribed'
+          && message.source === nextSource
+          && message.symbol === nextSymbol
+          && message.timeframe === DELTA_PROFILE_TIMEFRAME
+        ) {
+          if (resyncAfterConnect) {
+            void resyncDeltaProfileHistory(nextSource, nextSymbol, generation)
+          }
+          return
+        }
+
+        if (isRecord(message) && message.type === 'error') {
+          profileDiagnostic.value = typeof message.message === 'string'
+            ? `Feed 1m del Delta Profile: ${message.message}`
+            : 'El feed 1m del Delta Profile rechazó la suscripción'
+          return
+        }
+
+        const bar = parseMarketBar(message)
+        if (bar) {
+          upsertDeltaProfileBar(bar)
+        }
+      } catch {
+        profileDiagnostic.value = 'El feed 1m envió un mensaje inválido al Delta Profile'
+      }
+    })
+
+    nextSocket.addEventListener('close', () => {
+      if (profileSocket !== nextSocket || generation !== feedGeneration) {
+        return
+      }
+
+      profileSocket = undefined
+      profileReconnectTimer = setTimeout(() => {
+        connectDeltaProfileWebSocket(nextSource, nextSymbol, generation, true)
+      }, 1500)
+    })
+  } catch {
+    profileDiagnostic.value = 'No se pudo conectar el feed 1m del Delta Profile'
+  }
 }
 
 async function resyncMarketHistory(
@@ -240,6 +415,7 @@ async function resyncMarketHistory(
     changedBars.sort((left, right) => left.time - right.time)
     for (const bar of changedBars) {
       series.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+      deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
     }
 
     if (errorMessage.value.startsWith('Resincronización:')) {
@@ -334,6 +510,7 @@ function connectWebSocket(
 
         if (bar && upsertBar(bar) && seriesHydrated) {
           series?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+          deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
         }
       } catch {
         errorMessage.value = 'El servidor envió un mensaje WebSocket inválido'
@@ -374,9 +551,15 @@ async function loadMarketData(
   bars.clear()
   barCount.value = 0
   latestBarState.value = 'none'
+  profileDiagnostic.value = ''
+  profileBarCount.value = 0
+  deltaProfile.reset(nextSymbol, nextSource)
   stopWebSocket()
+  stopDeltaProfileWebSocket()
   replaceSeries()
   connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
+  connectDeltaProfileWebSocket(nextSource, nextSymbol, generation)
+  void resyncDeltaProfileHistory(nextSource, nextSymbol, generation)
 
   try {
     const history = await fetchMarketHistory(nextSource, nextSymbol, nextTimeframe)
@@ -426,6 +609,36 @@ async function applySettings() {
   }
 }
 
+function applyDeltaProfileSettings() {
+  if (profileWindowPreset.value === 'custom') {
+    profileSettings.rollingWindowMinutes = Math.min(
+      240,
+      Math.max(1, Math.round(Number(customProfileWindow.value) || 1))
+    )
+  } else {
+    profileSettings.rollingWindowMinutes = Number(profileWindowPreset.value)
+  }
+
+  customProfileWindow.value = profileSettings.rollingWindowMinutes
+  profileSettings.valueAreaPercentage = Math.min(
+    100,
+    Math.max(1, Number(profileSettings.valueAreaPercentage) || 70)
+  )
+  deltaProfile.configure({ ...profileSettings })
+  deltaProfileSeries?.setParams({ ...profileSettings })
+  refreshDeltaProfile(true)
+}
+
+function selectDeltaProfileWindow() {
+  if (profileWindowPreset.value !== 'custom') {
+    profileSettings.rollingWindowMinutes = Number(profileWindowPreset.value)
+    customProfileWindow.value = profileSettings.rollingWindowMinutes
+  } else {
+    customProfileWindow.value = profileSettings.rollingWindowMinutes
+  }
+  applyDeltaProfileSettings()
+}
+
 onMounted(() => {
   if (!chartHost.value) {
     return
@@ -439,9 +652,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   feedGeneration++
   stopWebSocket()
+  stopDeltaProfileWebSocket()
   chart?.api.destroy()
   chart = undefined
   series = undefined
+  deltaProfileSeries = undefined
 })
 </script>
 
@@ -531,6 +746,186 @@ onBeforeUnmount(() => {
           {{ socketStatus === 'connected' ? 'En vivo' : socketStatus === 'connecting' ? 'Conectando' : socketStatus === 'error' ? 'WebSocket error' : 'Desconectado' }}
         </span>
       </form>
+
+      <details class="rounded-xl border border-default bg-elevated/20 p-3">
+        <summary class="cursor-pointer text-sm font-semibold text-highlighted">
+          DELTA PROFILE — ROLLING WINDOW
+          <span class="ml-2 text-xs font-normal text-muted">
+            Fuente 1m · {{ profileSettings.rollingWindowMinutes }} min · {{ profileBarCount }} Bars
+          </span>
+        </summary>
+
+        <form
+          class="mt-4 flex flex-col gap-4"
+          @submit.prevent="applyDeltaProfileSettings"
+        >
+          <div class="flex flex-wrap items-end gap-3">
+            <label class="flex min-w-40 flex-col gap-1 text-xs font-medium text-muted">
+              Rolling Window
+              <select
+                v-model="profileWindowPreset"
+                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                @change="selectDeltaProfileWindow"
+              >
+                <option
+                  v-for="option in rollingWindowOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
+
+            <label
+              v-if="profileWindowPreset === 'custom'"
+              class="flex w-32 flex-col gap-1 text-xs font-medium text-muted"
+            >
+              Minutos (1–240)
+              <input
+                v-model.number="customProfileWindow"
+                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                type="number"
+                min="1"
+                max="240"
+              >
+            </label>
+
+            <label class="flex w-36 flex-col gap-1 text-xs font-medium text-muted">
+              Value Area (%)
+              <input
+                v-model.number="profileSettings.valueAreaPercentage"
+                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+              >
+            </label>
+
+            <label class="flex w-36 flex-col gap-1 text-xs font-medium text-muted">
+              Tick Size (opcional)
+              <input
+                v-model="profileSettings.tickSize"
+                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                inputmode="decimal"
+                placeholder="Precio original"
+              >
+            </label>
+
+            <label class="flex min-w-36 flex-col gap-1 text-xs font-medium text-muted">
+              Escala visual
+              <select
+                v-model="profileSettings.scaleMode"
+                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+              >
+                <option value="linear">Lineal</option>
+                <option value="logarithmic">Logarítmica</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted">
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.showBuyVolume"
+                type="checkbox"
+              >
+              Buy Volume
+            </label>
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.showSellVolume"
+                type="checkbox"
+              >
+              Sell Volume
+            </label>
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.showDelta"
+                type="checkbox"
+              >
+              Delta
+            </label>
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.showDeltaPercentage"
+                type="checkbox"
+              >
+              Delta %
+            </label>
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.showPoc"
+                type="checkbox"
+              >
+              POC
+            </label>
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.showValueArea"
+                type="checkbox"
+              >
+              Value Area
+            </label>
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.showMaxPositiveDelta"
+                type="checkbox"
+              >
+              Max Δ positivo
+            </label>
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.showMaxNegativeDelta"
+                type="checkbox"
+              >
+              Max Δ negativo
+            </label>
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.showLabels"
+                type="checkbox"
+              >
+              Etiquetas
+            </label>
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.includeFormingBar"
+                type="checkbox"
+              >
+              Incluir Bar en formación
+            </label>
+            <label class="flex items-center gap-2">
+              <input
+                v-model="profileSettings.autoUpdate"
+                type="checkbox"
+              >
+              Actualizar automáticamente
+            </label>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <button
+              type="submit"
+              class="min-h-9 rounded-md bg-primary px-4 text-sm font-semibold text-inverted"
+            >
+              Aplicar perfil
+            </button>
+            <button
+              v-if="!profileSettings.autoUpdate"
+              type="button"
+              class="min-h-9 rounded-md border border-default px-4 text-sm font-medium text-highlighted"
+              @click="refreshDeltaProfile(true)"
+            >
+              Actualizar ahora
+            </button>
+            <span class="text-xs text-muted">
+              Solo footprint de Bars 1m; la Bar live se excluye por defecto.
+            </span>
+          </div>
+        </form>
+      </details>
     </header>
 
     <p
@@ -541,9 +936,20 @@ onBeforeUnmount(() => {
       {{ errorMessage }}
     </p>
 
+    <p
+      v-if="profileDiagnostic"
+      class="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning"
+      role="status"
+    >
+      {{ profileDiagnostic }}
+    </p>
+
     <div class="flex items-center justify-between text-xs text-muted">
       <span>{{ source }} · {{ symbol }} · {{ timeframe }}</span>
       <div class="flex items-center gap-3">
+        <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
+          Delta Profile 1m · {{ profileSettings.rollingWindowMinutes }}m · {{ profileBarCount }} Bars
+        </span>
         <span
           v-if="latestBarState !== 'none'"
           class="rounded-full border px-2 py-1"
