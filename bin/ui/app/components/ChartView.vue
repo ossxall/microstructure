@@ -10,10 +10,6 @@ import {
   RollingDeltaProfile
 } from '~/utils/deltaProfileSeries'
 import {
-  createInstitutionalTradeSeries,
-  institutionalTradeDefaults
-} from '~/utils/institutionalTradeSeries'
-import {
   buildDeltaCandle,
   createDeltaCandleSeries,
   type DeltaBar,
@@ -39,8 +35,6 @@ interface HistoryResponse {
 const HISTORY_LIMIT = 50
 const DELTA_HISTORY_LIMIT = 15
 const DELTA_PROFILE_TIMEFRAME = '1m'
-const DEFAULT_INSTITUTIONAL_WINDOW_MINUTES = 15
-const MAX_INSTITUTIONAL_WINDOW_MINUTES = 60
 const HISTORY_REQUEST_TIMEOUT_MS = 25_000
 const sourceOptions: { label: string, value: MarketSource }[] = [
   { label: 'Binance', value: 'binance' },
@@ -84,12 +78,6 @@ const socketStatus = ref<'connecting' | 'connected' | 'disconnected' | 'error'>(
 const barCount = ref(0)
 const latestBarState = ref<'live' | 'final' | 'none'>('none')
 const profileSettings = reactive(deltaProfileDefaults())
-const institutionalTradeSettings = reactive({
-  ...institutionalTradeDefaults(),
-  enabled: true,
-  markerGapPixels: 20,
-  rollingWindowMinutes: DEFAULT_INSTITUTIONAL_WINDOW_MINUTES
-})
 const profileWindowPreset = ref('15')
 const customProfileWindow = ref(15)
 const profileBarCount = ref(0)
@@ -108,7 +96,6 @@ const canApply = computed(() => {
 
 const config = useRuntimeConfig()
 const bars = new Map<number, Bar>()
-const institutionalTradeBars = new Map<number, Bar>()
 const deltaBars = new Map<number, DeltaBar>()
 const deltaProfile = new RollingDeltaProfile(profileSettings, (message) => {
   profileDiagnostic.value = message
@@ -121,14 +108,12 @@ let series: AnyChartSeries | undefined
 let deltaCandleSeries: AnyChartSeries | undefined
 let bidAskFlowSeries: AnyChartSeries | undefined
 let deltaProfileSeries: AnyChartSeries | undefined
-let institutionalTradeSeries: AnyChartSeries | undefined
 let socket: WebSocket | undefined
 let profileSocket: WebSocket | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 let profileReconnectTimer: ReturnType<typeof setTimeout> | undefined
 let feedGeneration = 0
 let seriesHydrated = false
-let appliedInstitutionalWindowMinutes = DEFAULT_INSTITUTIONAL_WINDOW_MINUTES
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -269,14 +254,9 @@ function replaceSeries() {
   }
 
   deltaProfileSeries?.destroy({ silent: true })
-  institutionalTradeSeries?.destroy({ silent: true })
   series?.destroy({ silent: true })
   series = chart.api.addSeries(createOhlcvSeries())
   deltaProfileSeries = chart.api.addSeries(createDeltaProfileSeries(deltaProfile))
-  institutionalTradeSeries = chart.api.addSeries(createInstitutionalTradeSeries(
-    () => [...institutionalTradeBars.values()].sort((left, right) => left.time - right.time)
-  ))
-  applyInstitutionalTradeSettings(false)
 }
 
 function replaceDeltaCandleSeries() {
@@ -366,7 +346,6 @@ function renderCurrentBars() {
     // Full replacement is reserved for initial history hydration.
     series.setData(currentBars)
     deltaProfileSeries?.setData(currentBars)
-    institutionalTradeSeries?.setData(currentBars)
   }
 
   seriesHydrated = true
@@ -479,84 +458,6 @@ async function resyncDeltaProfileHistory(
   }
 }
 
-function refreshInstitutionalTradeProfile() {
-  institutionalTradeSeries?.setParams({
-    topPercentile: institutionalTradeSettings.topPercentile
-  })
-}
-
-function upsertInstitutionalTradeBar(bar: Bar, refresh = true): boolean {
-  if (!Array.isArray(bar.raw_ticks)) {
-    return false
-  }
-
-  const current = institutionalTradeBars.get(bar.time)
-  if (
-    current
-    && (
-      bar.revision < current.revision
-      || (current.is_final !== false && bar.is_final === false)
-    )
-  ) {
-    return false
-  }
-
-  institutionalTradeBars.set(bar.time, bar)
-  pruneInstitutionalTradeBars()
-
-  if (refresh) {
-    refreshInstitutionalTradeProfile()
-  }
-  return true
-}
-
-function pruneInstitutionalTradeBars() {
-  if (institutionalTradeBars.size <= institutionalTradeSettings.rollingWindowMinutes) {
-    return
-  }
-
-  const oldestTimes = [...institutionalTradeBars.keys()]
-    .sort((left, right) => left - right)
-    .slice(0, institutionalTradeBars.size - institutionalTradeSettings.rollingWindowMinutes)
-  oldestTimes.forEach(time => institutionalTradeBars.delete(time))
-}
-
-async function resyncInstitutionalTradeHistory(
-  nextSource: MarketSource,
-  nextSymbol: string,
-  generation: number
-) {
-  try {
-    const history = await fetchMarketHistory(
-      nextSource,
-      nextSymbol,
-      DELTA_PROFILE_TIMEFRAME,
-      {
-        limit: institutionalTradeSettings.rollingWindowMinutes,
-        includeRawTicks: true
-      }
-    )
-
-    if (generation !== feedGeneration) {
-      return
-    }
-
-    history.sort((left, right) => left.time - right.time)
-    for (const bar of history) {
-      upsertInstitutionalTradeBar(bar, false)
-      deltaProfile.upsert(bar)
-    }
-    refreshInstitutionalTradeProfile()
-    refreshDeltaProfile()
-  } catch (error) {
-    if (generation === feedGeneration) {
-      profileDiagnostic.value = error instanceof Error
-        ? `No se pudo cargar el histórico de trades institucionales: ${error.message}`
-        : 'No se pudo cargar el histórico de trades institucionales'
-    }
-  }
-}
-
 function stopDeltaProfileWebSocket() {
   if (profileReconnectTimer) {
     clearTimeout(profileReconnectTimer)
@@ -617,7 +518,6 @@ function connectDeltaProfileWebSocket(
               generation,
               profileSettings.rollingWindowMinutes
             )
-            void resyncInstitutionalTradeHistory(nextSource, nextSymbol, generation)
           }
           return
         }
@@ -637,7 +537,6 @@ function connectDeltaProfileWebSocket(
         const bar = parseMarketBar(message)
         if (bar) {
           upsertDeltaProfileBar(bar)
-          upsertInstitutionalTradeBar(bar)
         }
       } catch {
         profileDiagnostic.value = 'El feed 1m envió un mensaje inválido al Delta Profile'
@@ -857,7 +756,6 @@ async function loadMarketData(
   errorMessage.value = ''
   seriesHydrated = false
   bars.clear()
-  institutionalTradeBars.clear()
   deltaBars.clear()
   deltaCandleCount.value = 0
   bidAskFlowCandleCount.value = 0
@@ -896,35 +794,23 @@ async function loadMarketData(
       refreshDeltaProfile()
     }
     if (
-      (
-        nextTimeframe === DELTA_PROFILE_TIMEFRAME
-        && profileSettings.rollingWindowMinutes > HISTORY_LIMIT
-      )
-      || (
-        nextTimeframe !== DELTA_PROFILE_TIMEFRAME
-        && profileSettings.rollingWindowMinutes > institutionalTradeSettings.rollingWindowMinutes
-      )
+      nextTimeframe !== DELTA_PROFILE_TIMEFRAME
+      || profileSettings.rollingWindowMinutes > HISTORY_LIMIT
     ) {
       void resyncDeltaProfileHistory(nextSource, nextSymbol, generation)
     }
-    void resyncInstitutionalTradeHistory(nextSource, nextSymbol, generation)
   } catch (error) {
     if (generation === feedGeneration) {
       errorMessage.value = error instanceof Error
         ? `Histórico: ${error.message}`
         : 'No se pudo cargar el histórico'
       renderCurrentBars()
-      if (
-        profileSettings.rollingWindowMinutes > institutionalTradeSettings.rollingWindowMinutes
-      ) {
-        void resyncDeltaProfileHistory(
-          nextSource,
-          nextSymbol,
-          generation,
-          profileSettings.rollingWindowMinutes
-        )
-      }
-      void resyncInstitutionalTradeHistory(nextSource, nextSymbol, generation)
+      void resyncDeltaProfileHistory(
+        nextSource,
+        nextSymbol,
+        generation,
+        profileSettings.rollingWindowMinutes
+      )
     }
   } finally {
     if (generation === feedGeneration) {
@@ -978,10 +864,7 @@ function applyDeltaProfileSettings() {
       timeframe.value === DELTA_PROFILE_TIMEFRAME
       && profileSettings.rollingWindowMinutes > HISTORY_LIMIT
     )
-    || (
-      timeframe.value !== DELTA_PROFILE_TIMEFRAME
-      && profileSettings.rollingWindowMinutes > institutionalTradeSettings.rollingWindowMinutes
-    )
+    || timeframe.value !== DELTA_PROFILE_TIMEFRAME
   ) {
     void resyncDeltaProfileHistory(
       source.value,
@@ -989,41 +872,6 @@ function applyDeltaProfileSettings() {
       feedGeneration,
       profileSettings.rollingWindowMinutes
     )
-  }
-}
-
-function applyInstitutionalTradeSettings(refreshHistory = true) {
-  institutionalTradeSettings.topPercentile = Math.min(
-    99.9,
-    Math.max(50, Number(institutionalTradeSettings.topPercentile) || 99)
-  )
-  institutionalTradeSettings.rollingWindowMinutes = Math.min(
-    MAX_INSTITUTIONAL_WINDOW_MINUTES,
-    Math.max(1, Math.round(
-      Number(institutionalTradeSettings.rollingWindowMinutes)
-      || DEFAULT_INSTITUTIONAL_WINDOW_MINUTES
-    ))
-  )
-  institutionalTradeSettings.markerGapPixels = Math.min(
-    100,
-    Math.max(0, Math.round(Number(institutionalTradeSettings.markerGapPixels) || 0))
-  )
-  const windowChanged = appliedInstitutionalWindowMinutes
-    !== institutionalTradeSettings.rollingWindowMinutes
-  appliedInstitutionalWindowMinutes = institutionalTradeSettings.rollingWindowMinutes
-  pruneInstitutionalTradeBars()
-  institutionalTradeSeries?.setParams({
-    topPercentile: institutionalTradeSettings.topPercentile,
-    markerGapPixels: institutionalTradeSettings.markerGapPixels
-  })
-  institutionalTradeSeries?.setVisible(institutionalTradeSettings.enabled)
-  if (refreshHistory && windowChanged) {
-    void resyncInstitutionalTradeHistory(source.value, symbol.value, feedGeneration)
-  }
-
-  if (chart) {
-    chart.dirty = true
-    chart.overlayDirty = true
   }
 }
 
@@ -1069,7 +917,6 @@ onBeforeUnmount(() => {
   deltaCandleSeries = undefined
   bidAskFlowSeries = undefined
   deltaProfileSeries = undefined
-  institutionalTradeSeries = undefined
 })
 </script>
 
@@ -1337,84 +1184,6 @@ onBeforeUnmount(() => {
               Solo footprint de Bars 1m; incluye la Bar live mientras está en formación.
             </span>
           </div>
-        </form>
-      </details>
-
-      <details class="rounded-xl border border-default bg-elevated/20 p-3">
-        <summary class="cursor-pointer text-sm font-semibold text-highlighted">
-          INSTITUTIONAL TRADE PROFILE
-          <span class="ml-2 text-xs font-normal text-muted">
-            P{{ institutionalTradeSettings.topPercentile }} ·
-            {{ institutionalTradeSettings.rollingWindowMinutes }}m ·
-            {{ institutionalTradeSettings.markerGapPixels }}px ·
-            {{ institutionalTradeSettings.enabled ? 'visible' : 'oculto' }}
-          </span>
-        </summary>
-
-        <form
-          class="mt-4 flex flex-col gap-4"
-          @submit.prevent="applyInstitutionalTradeSettings"
-        >
-          <div class="flex flex-wrap items-end gap-3">
-            <label class="flex w-44 flex-col gap-1 text-xs font-medium text-muted">
-              Percentil de notional
-              <input
-                v-model.number="institutionalTradeSettings.topPercentile"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-                type="number"
-                min="50"
-                max="99.9"
-                step="0.1"
-              >
-            </label>
-
-            <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
-              Ventana 1m (1–60 min)
-              <input
-                v-model.number="institutionalTradeSettings.rollingWindowMinutes"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-                type="number"
-                min="1"
-                max="60"
-                step="1"
-              >
-            </label>
-
-            <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
-              Separación vela (px)
-              <input
-                v-model.number="institutionalTradeSettings.markerGapPixels"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-                type="number"
-                min="0"
-                max="100"
-                step="1"
-              >
-            </label>
-
-            <label class="flex items-center gap-2 pb-2 text-xs font-medium text-muted">
-              <input
-                v-model="institutionalTradeSettings.enabled"
-                type="checkbox"
-              >
-              Mostrar marcas
-            </label>
-
-            <button
-              type="submit"
-              class="min-h-9 rounded-md bg-primary px-4 text-sm font-semibold text-inverted"
-            >
-              Aplicar perfil
-            </button>
-          </div>
-
-          <p class="text-xs text-muted">
-            Filtra los trades de mayor notional en los raw_ticks cargados y muestra una torta
-            BUY/SELL junto a la última vela; los porcentajes representan la cantidad de trades de
-            cada lado. Usa las últimas
-            {{ institutionalTradeSettings.rollingWindowMinutes }} Bars 1m, incluida la live;
-            P99 selecciona aproximadamente el 1% superior.
-          </p>
         </form>
       </details>
     </header>

@@ -9,9 +9,9 @@ function createProfile(options = {}, onDiagnostic) {
   return new RollingDeltaProfile({ tickSize: '', ...options }, onDiagnostic)
 }
 
-test('defaults to a 50 price tick and includes the forming bar', () => {
+test('defaults to a 25 price tick and includes the forming bar', () => {
   const defaults = deltaProfileDefaults()
-  assert.equal(defaults.tickSize, '50')
+  assert.equal(defaults.tickSize, '25')
   assert.equal(defaults.includeFormingBar, true)
 })
 
