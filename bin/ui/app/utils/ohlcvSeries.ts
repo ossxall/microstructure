@@ -1,18 +1,13 @@
 import type { ChartEngine } from '../packages/open-charts/src/core/ChartEngine'
 import type { MainPane, SeriesDefinition } from '../packages/open-charts/src/core/types'
-import type { OhlcvBar } from './basicWasm'
-
-interface ChartOhlcvBar extends Omit<OhlcvBar, 'time'> {
-  /** Unix timestamp in seconds, as expected by open-charts. */
-  time: number
-}
+import type { Bar } from './bar'
 
 interface OhlcvParams {
   bullColor: string
   bearColor: string
 }
 
-export function createOhlcvSeries(): SeriesDefinition<ChartOhlcvBar, ChartOhlcvBar, OhlcvParams> {
+export function createOhlcvSeries(): SeriesDefinition<Bar, Bar, OhlcvParams> {
   const params: OhlcvParams = {
     bullColor: '#089981',
     bearColor: '#f23645'
@@ -35,8 +30,8 @@ export function createOhlcvSeries(): SeriesDefinition<ChartOhlcvBar, ChartOhlcvB
       ctx: CanvasRenderingContext2D,
       pane: MainPane,
       engine: ChartEngine,
-      _data: readonly ChartOhlcvBar[],
-      values: readonly ChartOhlcvBar[],
+      _data: readonly Bar[],
+      values: readonly Bar[],
       seriesParams: OhlcvParams,
       priceMin: number,
       priceMax: number

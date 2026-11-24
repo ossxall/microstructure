@@ -2,15 +2,11 @@
 import { onBeforeUnmount, onMounted, ref, computed } from 'vue'
 import { createChart } from '~/packages/open-charts/src'
 import type { AnyChartSeries, ChartEngine } from '~/packages/open-charts/src/core/types'
-import { resampleOhlcv, type OhlcvBar } from '~/utils/basicWasm'
+import type { Bar } from '~/utils/bar'
 import { createOhlcvSeries } from '~/utils/ohlcvSeries'
 
 type MarketSource = 'binance' | 'dydx'
 type Timeframe = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d'
-
-interface MinuteBar extends OhlcvBar {
-  revision: number
-}
 
 interface HistoryResponse {
   success?: boolean
@@ -21,17 +17,6 @@ interface HistoryResponse {
 }
 
 const HISTORY_LIMIT = 500
-const MARKET_DATA_TIMEFRAME: Timeframe = '1m'
-const BAR_TIMEFRAMES: Record<Timeframe, number> = {
-  '1m': 60_000,
-  '5m': 5 * 60_000,
-  '15m': 15 * 60_000,
-  '30m': 30 * 60_000,
-  '1h': 60 * 60_000,
-  '4h': 4 * 60 * 60_000,
-  '1d': 24 * 60 * 60_000
-}
-
 const sourceOptions: { label: string, value: MarketSource }[] = [
   { label: 'Binance', value: 'binance' },
   { label: 'dYdX', value: 'dydx' }
@@ -57,7 +42,7 @@ const draftTimeframe = ref<Timeframe>(timeframe.value)
 const isLoading = ref(false)
 const errorMessage = ref('')
 const socketStatus = ref<'connecting' | 'connected' | 'disconnected' | 'error'>('disconnected')
-const minuteBarCount = ref(0)
+const barCount = ref(0)
 const canApply = computed(() => {
   return !isLoading.value && (
     draftSource.value !== source.value
@@ -67,13 +52,12 @@ const canApply = computed(() => {
 })
 
 const config = useRuntimeConfig()
-const minuteBars = new Map<number, MinuteBar>()
+const bars = new Map<number, Bar>()
 let chart: ChartEngine | undefined
 let series: AnyChartSeries | undefined
 let socket: WebSocket | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 let feedGeneration = 0
-let renderGeneration = 0
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -91,7 +75,7 @@ function numberValue(value: unknown): number {
   return Number.NaN
 }
 
-function parseMarketBar(value: unknown): MinuteBar | null {
+function parseMarketBar(value: unknown): Bar | null {
   if (!isRecord(value)) {
     return null
   }
@@ -122,18 +106,20 @@ function parseMarketBar(value: unknown): MinuteBar | null {
   }
 
   return {
-    time: timestamp,
+    ...bar,
+    // open-charts uses Unix timestamps in seconds for its time axis.
+    time: timestamp / 1000,
     open,
     high,
     low,
     close,
     volume,
     revision: Number.isFinite(revision) ? revision : 0
-  }
+  } as Bar
 }
 
-function upsertMinuteBar(bar: MinuteBar): boolean {
-  const current = minuteBars.get(bar.time)
+function upsertBar(bar: Bar): boolean {
+  const current = bars.get(bar.time)
 
   if (
     current
@@ -141,28 +127,24 @@ function upsertMinuteBar(bar: MinuteBar): boolean {
       bar.revision < current.revision
       || (
         bar.revision === current.revision
-        && bar.open === current.open
-        && bar.high === current.high
-        && bar.low === current.low
-        && bar.close === current.close
-        && bar.volume === current.volume
+        && JSON.stringify(bar) === JSON.stringify(current)
       )
     )
   ) {
     return false
   }
 
-  minuteBars.set(bar.time, bar)
+  bars.set(bar.time, bar)
 
-  if (minuteBars.size > HISTORY_LIMIT) {
-    const oldestTimes = [...minuteBars.keys()]
+  if (bars.size > HISTORY_LIMIT) {
+    const oldestTimes = [...bars.keys()]
       .sort((left, right) => left - right)
-      .slice(0, minuteBars.size - HISTORY_LIMIT)
+      .slice(0, bars.size - HISTORY_LIMIT)
 
-    oldestTimes.forEach(time => minuteBars.delete(time))
+    oldestTimes.forEach(time => bars.delete(time))
   }
 
-  minuteBarCount.value = minuteBars.size
+  barCount.value = bars.size
   return true
 }
 
@@ -175,31 +157,14 @@ function replaceSeries() {
   series = chart.api.addSeries(createOhlcvSeries())
 }
 
-async function renderCurrentBars() {
-  const currentRender = ++renderGeneration
-  const bars = [...minuteBars.values()].sort((left, right) => left.time - right.time)
+function renderCurrentBars() {
+  const currentBars = [...bars.values()].sort((left, right) => left.time - right.time)
 
-  if (!series || bars.length === 0) {
+  if (!series || currentBars.length === 0) {
     return
   }
 
-  try {
-    const resampled = await resampleOhlcv(bars, BAR_TIMEFRAMES[timeframe.value])
-
-    if (currentRender !== renderGeneration || !series) {
-      return
-    }
-
-    series.setData(resampled.map(bar => ({
-      ...bar,
-      // open-charts uses Unix timestamps in seconds for its time axis.
-      time: bar.time / 1000
-    })))
-  } catch (error) {
-    if (currentRender === renderGeneration) {
-      errorMessage.value = error instanceof Error ? error.message : 'No se pudieron procesar las barras'
-    }
-  }
+  series.setData(currentBars)
 }
 
 function stopWebSocket() {
@@ -214,7 +179,12 @@ function stopWebSocket() {
   socketStatus.value = 'disconnected'
 }
 
-function connectWebSocket(nextSource: MarketSource, nextSymbol: string, generation: number) {
+function connectWebSocket(
+  nextSource: MarketSource,
+  nextSymbol: string,
+  nextTimeframe: Timeframe,
+  generation: number
+) {
   if (generation !== feedGeneration) {
     return
   }
@@ -235,7 +205,7 @@ function connectWebSocket(nextSource: MarketSource, nextSymbol: string, generati
         action: 'subscribe',
         source: nextSource,
         symbol: nextSymbol,
-        timeframe: MARKET_DATA_TIMEFRAME
+        timeframe: nextTimeframe
       }))
     })
 
@@ -256,8 +226,8 @@ function connectWebSocket(nextSource: MarketSource, nextSymbol: string, generati
 
         const bar = parseMarketBar(message)
 
-        if (bar && upsertMinuteBar(bar)) {
-          void renderCurrentBars()
+        if (bar && upsertBar(bar)) {
+          renderCurrentBars()
         }
       } catch {
         errorMessage.value = 'El servidor envió un mensaje WebSocket inválido'
@@ -278,7 +248,7 @@ function connectWebSocket(nextSource: MarketSource, nextSymbol: string, generati
       socket = undefined
       socketStatus.value = 'disconnected'
       reconnectTimer = setTimeout(() => {
-        connectWebSocket(nextSource, nextSymbol, generation)
+        connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
       }, 1500)
     })
   } catch {
@@ -286,16 +256,19 @@ function connectWebSocket(nextSource: MarketSource, nextSymbol: string, generati
   }
 }
 
-async function loadMarketData(nextSource: MarketSource, nextSymbol: string) {
+async function loadMarketData(
+  nextSource: MarketSource,
+  nextSymbol: string,
+  nextTimeframe: Timeframe
+) {
   const generation = ++feedGeneration
-  renderGeneration++
   isLoading.value = true
   errorMessage.value = ''
-  minuteBars.clear()
-  minuteBarCount.value = 0
+  bars.clear()
+  barCount.value = 0
   stopWebSocket()
   replaceSeries()
-  connectWebSocket(nextSource, nextSymbol, generation)
+  connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
 
   try {
     const response = await $fetch<HistoryResponse>('/api/market/get-history', {
@@ -303,7 +276,7 @@ async function loadMarketData(nextSource: MarketSource, nextSymbol: string) {
       body: {
         source: nextSource,
         symbol: nextSymbol,
-        timeframe: MARKET_DATA_TIMEFRAME,
+        timeframe: nextTimeframe,
         limit: HISTORY_LIMIT
       }
     })
@@ -320,17 +293,17 @@ async function loadMarketData(nextSource: MarketSource, nextSymbol: string) {
       const bar = parseMarketBar(rawBar)
 
       if (bar) {
-        upsertMinuteBar(bar)
+        upsertBar(bar)
       }
     }
 
-    await renderCurrentBars()
+    renderCurrentBars()
   } catch (error) {
     if (generation === feedGeneration) {
       errorMessage.value = error instanceof Error
         ? `Histórico: ${error.message}`
         : 'No se pudo cargar el histórico'
-      await renderCurrentBars()
+      renderCurrentBars()
     }
   } finally {
     if (generation === feedGeneration) {
@@ -347,19 +320,17 @@ async function applySettings() {
     return
   }
 
-  const marketChanged = draftSource.value !== source.value || nextSymbol !== symbol.value
-  const timeframeChanged = draftTimeframe.value !== timeframe.value
+  const settingsChanged = draftSource.value !== source.value
+    || nextSymbol !== symbol.value
+    || draftTimeframe.value !== timeframe.value
 
   source.value = draftSource.value
   symbol.value = nextSymbol
   draftSymbol.value = nextSymbol
   timeframe.value = draftTimeframe.value
 
-  if (marketChanged) {
-    await loadMarketData(source.value, symbol.value)
-  } else if (timeframeChanged) {
-    errorMessage.value = ''
-    await renderCurrentBars()
+  if (settingsChanged) {
+    await loadMarketData(source.value, symbol.value, timeframe.value)
   }
 }
 
@@ -370,12 +341,11 @@ onMounted(() => {
 
   chart = createChart(chartHost.value)
   replaceSeries()
-  void loadMarketData(source.value, symbol.value)
+  void loadMarketData(source.value, symbol.value, timeframe.value)
 })
 
 onBeforeUnmount(() => {
   feedGeneration++
-  renderGeneration++
   stopWebSocket()
   chart?.api.destroy()
   chart = undefined
@@ -481,7 +451,7 @@ onBeforeUnmount(() => {
 
     <div class="flex items-center justify-between text-xs text-muted">
       <span>{{ source }} · {{ symbol }} · {{ timeframe }}</span>
-      <span>{{ minuteBarCount }} / {{ HISTORY_LIMIT }} barras 1m</span>
+      <span>{{ barCount }} / {{ HISTORY_LIMIT }} barras {{ timeframe }}</span>
     </div>
 
     <div class="chart-view__surface relative overflow-hidden rounded-xl border border-default bg-elevated/30 sm:min-h-[520px]">
@@ -492,14 +462,14 @@ onBeforeUnmount(() => {
         aria-label="Gráfico de velas OHLCV"
       />
       <div
-        v-if="isLoading && minuteBarCount === 0"
+        v-if="isLoading && barCount === 0"
         class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/70 text-sm text-muted"
         role="status"
       >
         Cargando histórico de {{ symbol }}…
       </div>
       <div
-        v-else-if="!isLoading && minuteBarCount === 0"
+        v-else-if="!isLoading && barCount === 0"
         class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-sm text-muted"
       >
         No hay barras históricas para mostrar.
