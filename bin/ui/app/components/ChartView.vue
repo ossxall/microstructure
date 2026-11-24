@@ -13,6 +13,12 @@ import {
   createInstitutionalTradeSeries,
   institutionalTradeDefaults
 } from '~/utils/institutionalTradeSeries'
+import {
+  buildDeltaCandle,
+  createDeltaCandleSeries,
+  type DeltaBar,
+  type DeltaMode
+} from '~/utils/deltaCandleSeries'
 
 type MarketSource = 'binance' | 'dydx'
 type Timeframe = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d'
@@ -26,6 +32,7 @@ interface HistoryResponse {
 }
 
 const HISTORY_LIMIT = 50
+const DELTA_HISTORY_LIMIT = 15
 const DELTA_PROFILE_TIMEFRAME = '1m'
 const DEFAULT_INSTITUTIONAL_WINDOW_MINUTES = 15
 const MAX_INSTITUTIONAL_WINDOW_MINUTES = 60
@@ -58,6 +65,7 @@ const rollingWindowOptions = [
 ]
 
 const chartHost = ref<HTMLElement | null>(null)
+const deltaChartHost = ref<HTMLElement | null>(null)
 const source = ref<MarketSource>('binance')
 const symbol = ref('BTCUSDT')
 const timeframe = ref<Timeframe>('1m')
@@ -80,6 +88,8 @@ const profileWindowPreset = ref('15')
 const customProfileWindow = ref(15)
 const profileBarCount = ref(0)
 const profileDiagnostic = ref('')
+const deltaMode = ref<DeltaMode>('PER_BAR')
+const deltaCandleCount = ref(0)
 const canApply = computed(() => {
   return !isLoading.value && (
     draftSource.value !== source.value
@@ -91,12 +101,15 @@ const canApply = computed(() => {
 const config = useRuntimeConfig()
 const bars = new Map<number, Bar>()
 const institutionalTradeBars = new Map<number, Bar>()
+const deltaBars = new Map<number, DeltaBar>()
 const deltaProfile = new RollingDeltaProfile(profileSettings, (message) => {
   profileDiagnostic.value = message
   console.warn(message)
 })
 let chart: ChartEngine | undefined
+let deltaChart: ChartEngine | undefined
 let series: AnyChartSeries | undefined
+let deltaCandleSeries: AnyChartSeries | undefined
 let deltaProfileSeries: AnyChartSeries | undefined
 let institutionalTradeSeries: AnyChartSeries | undefined
 let socket: WebSocket | undefined
@@ -169,6 +182,31 @@ function parseMarketBar(value: unknown): Bar | null {
   } as Bar
 }
 
+function parseDeltaBar(value: unknown): DeltaBar | null {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  const bar = isRecord(value.data) ? value.data : value
+  const timestamp = numberValue(bar.timestamp ?? bar.time)
+  const revision = numberValue(bar.revision ?? value.revision ?? 0)
+  if (!Number.isFinite(timestamp)) {
+    return null
+  }
+
+  const header = isRecord(bar.header) ? bar.header : undefined
+  const rawTicks = Array.isArray(bar.raw_ticks)
+    ? bar.raw_ticks.filter(isRecord)
+    : undefined
+
+  return {
+    time: timestamp / 1000,
+    revision: Number.isFinite(revision) ? revision : 0,
+    ...(header ? { header } : {}),
+    ...(rawTicks ? { raw_ticks: rawTicks } : {})
+  }
+}
+
 function upsertBar(bar: Bar): boolean {
   const current = bars.get(bar.time)
 
@@ -231,6 +269,60 @@ function replaceSeries() {
   applyInstitutionalTradeSettings(false)
 }
 
+function replaceDeltaCandleSeries() {
+  if (!deltaChart) {
+    return
+  }
+
+  deltaCandleSeries?.destroy({ silent: true })
+  deltaCandleSeries = deltaChart.api.addSeries(createDeltaCandleSeries())
+  deltaCandleSeries.setParams({ mode: deltaMode.value })
+  deltaCandleCount.value = 0
+}
+
+function refreshDeltaCandleCount() {
+  deltaCandleCount.value = [...deltaBars.values()]
+    .reduce((count, bar) => {
+      const candle = buildDeltaCandle(bar, 0, deltaMode.value)
+      return candle ? count + 1 : count
+    }, 0)
+}
+
+function upsertDeltaBar(bar: DeltaBar): boolean {
+  if (!Array.isArray(bar.raw_ticks)) {
+    return false
+  }
+
+  const current = deltaBars.get(bar.time)
+  if (
+    current
+    && (
+      bar.revision < current.revision
+      || (
+        bar.revision === current.revision
+        && JSON.stringify(bar) === JSON.stringify(current)
+      )
+    )
+  ) {
+    return false
+  }
+
+  deltaBars.set(bar.time, bar)
+  const oldestTimes = [...deltaBars.keys()]
+    .sort((left, right) => left - right)
+    .slice(0, Math.max(0, deltaBars.size - DELTA_HISTORY_LIMIT))
+  oldestTimes.forEach(time => deltaBars.delete(time))
+
+  deltaCandleSeries?.upsert(bar, { maxDataPoints: DELTA_HISTORY_LIMIT })
+  refreshDeltaCandleCount()
+  return true
+}
+
+function applyDeltaMode() {
+  deltaCandleSeries?.setParams({ mode: deltaMode.value })
+  refreshDeltaCandleCount()
+}
+
 function renderCurrentBars() {
   const currentBars = [...bars.values()].sort((left, right) => left.time - right.time)
 
@@ -274,6 +366,32 @@ async function fetchMarketHistory(
   return (response.data?.history ?? [])
     .map(parseMarketBar)
     .filter((bar): bar is Bar => bar !== null)
+}
+
+async function fetchDeltaHistory(
+  nextSource: MarketSource,
+  nextSymbol: string,
+  nextTimeframe: string
+): Promise<DeltaBar[]> {
+  const response = await $fetch<HistoryResponse>('/api/market/get-history', {
+    method: 'POST',
+    timeout: HISTORY_REQUEST_TIMEOUT_MS,
+    body: {
+      source: nextSource,
+      symbol: nextSymbol,
+      timeframe: nextTimeframe,
+      limit: DELTA_HISTORY_LIMIT,
+      include_raw_ticks: true
+    }
+  })
+
+  if (response.success === false) {
+    throw new Error(response.message || 'No se pudo cargar el histórico de delta')
+  }
+
+  return (response.data?.history ?? [])
+    .map(parseDeltaBar)
+    .filter((bar): bar is DeltaBar => bar !== null)
 }
 
 function refreshDeltaProfile(force = false) {
@@ -479,6 +597,11 @@ function connectDeltaProfileWebSocket(
           return
         }
 
+        const deltaBar = parseDeltaBar(message)
+        if (deltaBar && timeframe.value === DELTA_PROFILE_TIMEFRAME) {
+          upsertDeltaBar(deltaBar)
+        }
+
         const bar = parseMarketBar(message)
         if (bar) {
           upsertDeltaProfileBar(bar)
@@ -540,6 +663,32 @@ async function resyncMarketHistory(
       errorMessage.value = error instanceof Error
         ? `Resincronización: ${error.message}`
         : 'No se pudo resincronizar el histórico'
+    }
+  }
+}
+
+async function resyncDeltaHistory(
+  nextSource: MarketSource,
+  nextSymbol: string,
+  nextTimeframe: Timeframe,
+  generation: number
+) {
+  try {
+    const history = await fetchDeltaHistory(nextSource, nextSymbol, nextTimeframe)
+
+    if (generation !== feedGeneration) {
+      return
+    }
+
+    history.sort((left, right) => left.time - right.time)
+    for (const bar of history) {
+      upsertDeltaBar(bar)
+    }
+  } catch (error) {
+    if (generation === feedGeneration) {
+      profileDiagnostic.value = error instanceof Error
+        ? `No se pudo cargar el histórico de velas de delta: ${error.message}`
+        : 'No se pudo cargar el histórico de velas de delta'
     }
   }
 }
@@ -609,6 +758,12 @@ function connectWebSocket(
               nextTimeframe,
               generation
             )
+            void resyncDeltaHistory(
+              nextSource,
+              nextSymbol,
+              nextTimeframe,
+              generation
+            )
           }
           return
         }
@@ -620,11 +775,18 @@ function connectWebSocket(
           return
         }
 
+        const deltaBar = parseDeltaBar(message)
+        if (deltaBar) {
+          upsertDeltaBar(deltaBar)
+        }
+
         const bar = parseMarketBar(message)
 
-        if (bar && upsertBar(bar) && seriesHydrated) {
-          series?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
-          deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+        if (bar) {
+          if (upsertBar(bar) && seriesHydrated) {
+            series?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+            deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+          }
         }
       } catch {
         errorMessage.value = 'El servidor envió un mensaje WebSocket inválido'
@@ -664,6 +826,8 @@ async function loadMarketData(
   seriesHydrated = false
   bars.clear()
   institutionalTradeBars.clear()
+  deltaBars.clear()
+  deltaCandleCount.value = 0
   barCount.value = 0
   latestBarState.value = 'none'
   profileDiagnostic.value = ''
@@ -672,8 +836,10 @@ async function loadMarketData(
   stopWebSocket()
   stopDeltaProfileWebSocket()
   replaceSeries()
+  replaceDeltaCandleSeries()
   connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
   connectDeltaProfileWebSocket(nextSource, nextSymbol, generation)
+  void resyncDeltaHistory(nextSource, nextSymbol, nextTimeframe, generation)
 
   try {
     const history = await fetchMarketHistory(nextSource, nextSymbol, nextTimeframe, {
@@ -844,6 +1010,10 @@ onMounted(() => {
 
   chart = createChart(chartHost.value)
   replaceSeries()
+  if (deltaChartHost.value) {
+    deltaChart = createChart(deltaChartHost.value)
+    replaceDeltaCandleSeries()
+  }
   void loadMarketData(source.value, symbol.value, timeframe.value)
 })
 
@@ -852,8 +1022,11 @@ onBeforeUnmount(() => {
   stopWebSocket()
   stopDeltaProfileWebSocket()
   chart?.api.destroy()
+  deltaChart?.api.destroy()
   chart = undefined
+  deltaChart = undefined
   series = undefined
+  deltaCandleSeries = undefined
   deltaProfileSeries = undefined
   institutionalTradeSeries = undefined
 })
@@ -1241,11 +1414,11 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="chart-view__surface relative overflow-hidden rounded-xl border border-default bg-elevated/30 sm:min-h-[520px]">
+    <div class="relative box-border h-[clamp(420px,65vh,720px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
       <div
         id="ohlcv-chart"
         ref="chartHost"
-        class="chart-area h-full w-full"
+        class="h-full w-full"
         aria-label="Gráfico de velas OHLCV"
       />
       <div
@@ -1262,5 +1435,51 @@ onBeforeUnmount(() => {
         No hay barras históricas para mostrar.
       </div>
     </div>
+
+    <section
+      class="flex flex-col gap-3"
+      aria-labelledby="delta-chart-title"
+    >
+      <header class="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2
+            id="delta-chart-title"
+            class="text-base font-semibold text-highlighted"
+          >
+            VELAS DE DELTA
+          </h2>
+          <p class="mt-1 text-xs text-muted">
+            Unidad qty · solo cantidades de raw_ticks · {{ deltaCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
+          </p>
+        </div>
+        <label class="flex flex-col gap-1 text-xs font-medium text-muted">
+          Modo
+          <select
+            v-model="deltaMode"
+            class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+            @change="applyDeltaMode"
+          >
+            <option value="PER_BAR">Per bar</option>
+            <option value="CVD">CVD</option>
+          </select>
+        </label>
+      </header>
+
+      <div class="relative box-border h-[clamp(260px,35vh,380px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
+        <div
+          id="delta-chart"
+          ref="deltaChartHost"
+          class="h-full w-full"
+          aria-label="Gráfico de velas de delta"
+        />
+        <div
+          v-if="deltaCandleCount === 0"
+          class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
+          role="status"
+        >
+          Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
+        </div>
+      </div>
+    </section>
   </section>
 </template>

@@ -17,39 +17,47 @@
   --color-green-950: #052E16;
 }
 
-#ohlcv-chart {
+#ohlcv-chart,
+#delta-chart {
   position: relative;
   display: flex;
   width: 100%;
   height: 100%;
   min-width: 0;
-  min-height: 420px;
   flex-direction: column;
   overflow: hidden;
   background: #0b0f14;
 }
 
-.chart-view__surface {
-  box-sizing: border-box;
-  flex: 0 0 auto;
-  height: clamp(420px, 65vh, 720px);
+#ohlcv-chart {
+  min-height: 420px;
 }
 
-#ohlcv-chart .pane {
+#delta-chart {
+  min-height: 240px;
+}
+
+#ohlcv-chart .pane,
+#delta-chart .pane {
   position: relative;
   min-height: 0;
   flex-shrink: 0;
   overflow: hidden;
 }
 
-#ohlcv-chart #pane-main {
+#ohlcv-chart #pane-main,
+#delta-chart #pane-main {
   flex: 1 1 0;
 }
 
 #ohlcv-chart canvas.chart-canvas,
+#delta-chart canvas.chart-canvas,
 #ohlcv-chart canvas.drawings-canvas,
+#delta-chart canvas.drawings-canvas,
 #ohlcv-chart canvas.pricescale-canvas,
-#ohlcv-chart canvas.overlay-canvas {
+#delta-chart canvas.pricescale-canvas,
+#ohlcv-chart canvas.overlay-canvas,
+#delta-chart canvas.overlay-canvas {
   position: absolute;
   top: 0;
   left: 0;
@@ -57,16 +65,20 @@
 }
 
 #ohlcv-chart canvas.drawings-canvas,
-#ohlcv-chart canvas.overlay-canvas {
+#delta-chart canvas.drawings-canvas,
+#ohlcv-chart canvas.overlay-canvas,
+#delta-chart canvas.overlay-canvas {
   pointer-events: none;
 }
 
-#ohlcv-chart canvas.pricescale-canvas {
+#ohlcv-chart canvas.pricescale-canvas,
+#delta-chart canvas.pricescale-canvas {
   right: 0;
   left: auto;
 }
 
-#ohlcv-chart #time-axis {
+#ohlcv-chart #time-axis,
+#delta-chart #time-axis {
   position: relative;
   height: 24px;
   flex-shrink: 0;
@@ -74,24 +86,28 @@
   background: #0b0f14;
 }
 
-#ohlcv-chart #time-axis canvas {
+#ohlcv-chart #time-axis canvas,
+#delta-chart #time-axis canvas {
   position: absolute;
   top: 0;
   left: 0;
 }
 
-#ohlcv-chart #scrollbar {
+#ohlcv-chart #scrollbar,
+#delta-chart #scrollbar {
   position: relative;
   height: 1px;
   flex-shrink: 0;
 }
 
-#ohlcv-chart #scrollthumb {
+#ohlcv-chart #scrollthumb,
+#delta-chart #scrollthumb {
   position: absolute;
   height: 1px;
 }
 
-#ohlcv-chart #chart-legend {
+#ohlcv-chart #chart-legend,
+#delta-chart #chart-legend {
   position: absolute;
   z-index: 2;
   top: 8px;
@@ -101,7 +117,8 @@
   pointer-events: none;
 }
 
-#ohlcv-chart #chart-indicators {
+#ohlcv-chart #chart-indicators,
+#delta-chart #chart-indicators {
   position: absolute;
   z-index: 2;
   top: 32px;
@@ -112,14 +129,18 @@
   pointer-events: none;
 }
 
-#ohlcv-chart .chart-indicators-item {
+#ohlcv-chart .chart-indicators-item,
+#delta-chart .chart-indicators-item {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
 
 #ohlcv-chart .chart-indicators-item-settings,
+#delta-chart .chart-indicators-item-settings,
 #ohlcv-chart .chart-indicators-item-delete,
-#ohlcv-chart .chart-overlay-ui {
+#delta-chart .chart-indicators-item-delete,
+#ohlcv-chart .chart-overlay-ui,
+#delta-chart .chart-overlay-ui {
   display: none;
 }

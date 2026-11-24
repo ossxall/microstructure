@@ -76,6 +76,10 @@ se normalizan el tiempo y OHLCV usados para dibujar. El proxy HTTP usa
 URL pública del WebSocket se puede cambiar con
 `NUXT_PUBLIC_MARKET_WEBSOCKET_URL` (por defecto
 `ws://localhost:3001/api/market/ws`).
+Debajo del chart principal, VELAS DE DELTA muestra un chart independiente con
+hasta las últimas 15 Bars del timeframe seleccionado que incluyen `raw_ticks`.
+Permite alternar entre delta reiniciado por Bar (PER_BAR) y delta acumulado (CVD);
+los valores y la escala usan cantidades, nunca precios.
 
 ## Production
 
