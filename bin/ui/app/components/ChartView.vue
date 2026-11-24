@@ -58,6 +58,7 @@ let series: AnyChartSeries | undefined
 let socket: WebSocket | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 let feedGeneration = 0
+let seriesHydrated = false
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -145,7 +146,7 @@ function upsertBar(bar: Bar): boolean {
   }
 
   barCount.value = bars.size
-  return true
+  return bars.has(bar.time)
 }
 
 function replaceSeries() {
@@ -160,11 +161,77 @@ function replaceSeries() {
 function renderCurrentBars() {
   const currentBars = [...bars.values()].sort((left, right) => left.time - right.time)
 
-  if (!series || currentBars.length === 0) {
+  if (!series) {
     return
   }
 
-  series.setData(currentBars)
+  if (currentBars.length > 0) {
+    // Full replacement is reserved for initial history hydration.
+    series.setData(currentBars)
+  }
+
+  seriesHydrated = true
+}
+
+async function fetchMarketHistory(
+  nextSource: MarketSource,
+  nextSymbol: string,
+  nextTimeframe: Timeframe
+): Promise<Bar[]> {
+  const response = await $fetch<HistoryResponse>('/api/market/get-history', {
+    method: 'POST',
+    body: {
+      source: nextSource,
+      symbol: nextSymbol,
+      timeframe: nextTimeframe,
+      limit: HISTORY_LIMIT
+    }
+  })
+
+  if (response.success === false) {
+    throw new Error(response.message || 'No se pudo cargar el histórico')
+  }
+
+  return (response.data?.history ?? [])
+    .map(parseMarketBar)
+    .filter((bar): bar is Bar => bar !== null)
+}
+
+async function resyncMarketHistory(
+  nextSource: MarketSource,
+  nextSymbol: string,
+  nextTimeframe: Timeframe,
+  generation: number
+) {
+  try {
+    const history = await fetchMarketHistory(nextSource, nextSymbol, nextTimeframe)
+
+    if (generation !== feedGeneration) {
+      return
+    }
+
+    const changedBars = history.filter(upsertBar)
+    if (!seriesHydrated || !series) {
+      return
+    }
+
+    // Apply bars oldest-first: missed bars then take the cheap append path,
+    // while any late revision is recomputed before newer bars are appended.
+    changedBars.sort((left, right) => left.time - right.time)
+    for (const bar of changedBars) {
+      series.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+    }
+
+    if (errorMessage.value.startsWith('Resincronización:')) {
+      errorMessage.value = ''
+    }
+  } catch (error) {
+    if (generation === feedGeneration) {
+      errorMessage.value = error instanceof Error
+        ? `Resincronización: ${error.message}`
+        : 'No se pudo resincronizar el histórico'
+    }
+  }
 }
 
 function stopWebSocket() {
@@ -183,7 +250,8 @@ function connectWebSocket(
   nextSource: MarketSource,
   nextSymbol: string,
   nextTimeframe: Timeframe,
-  generation: number
+  generation: number,
+  resyncAfterConnect = false
 ) {
   if (generation !== feedGeneration) {
     return
@@ -217,6 +285,24 @@ function connectWebSocket(
       try {
         const message: unknown = JSON.parse(event.data)
 
+        if (
+          isRecord(message)
+          && message.type === 'subscribed'
+          && message.source === nextSource
+          && message.symbol === nextSymbol
+          && message.timeframe === nextTimeframe
+        ) {
+          if (resyncAfterConnect) {
+            void resyncMarketHistory(
+              nextSource,
+              nextSymbol,
+              nextTimeframe,
+              generation
+            )
+          }
+          return
+        }
+
         if (isRecord(message) && message.type === 'error') {
           errorMessage.value = typeof message.message === 'string'
             ? message.message
@@ -226,8 +312,8 @@ function connectWebSocket(
 
         const bar = parseMarketBar(message)
 
-        if (bar && upsertBar(bar)) {
-          renderCurrentBars()
+        if (bar && upsertBar(bar) && seriesHydrated) {
+          series?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
         }
       } catch {
         errorMessage.value = 'El servidor envió un mensaje WebSocket inválido'
@@ -248,7 +334,7 @@ function connectWebSocket(
       socket = undefined
       socketStatus.value = 'disconnected'
       reconnectTimer = setTimeout(() => {
-        connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
+        connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation, true)
       }, 1500)
     })
   } catch {
@@ -264,6 +350,7 @@ async function loadMarketData(
   const generation = ++feedGeneration
   isLoading.value = true
   errorMessage.value = ''
+  seriesHydrated = false
   bars.clear()
   barCount.value = 0
   stopWebSocket()
@@ -271,30 +358,14 @@ async function loadMarketData(
   connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
 
   try {
-    const response = await $fetch<HistoryResponse>('/api/market/get-history', {
-      method: 'POST',
-      body: {
-        source: nextSource,
-        symbol: nextSymbol,
-        timeframe: nextTimeframe,
-        limit: HISTORY_LIMIT
-      }
-    })
+    const history = await fetchMarketHistory(nextSource, nextSymbol, nextTimeframe)
 
     if (generation !== feedGeneration) {
       return
     }
 
-    if (response.success === false) {
-      throw new Error(response.message || 'No se pudo cargar el histórico')
-    }
-
-    for (const rawBar of response.data?.history ?? []) {
-      const bar = parseMarketBar(rawBar)
-
-      if (bar) {
-        upsertBar(bar)
-      }
+    for (const bar of history) {
+      upsertBar(bar)
     }
 
     renderCurrentBars()

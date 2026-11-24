@@ -141,6 +141,21 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     topic = %topic,
                                     "Subscribed to bars"
                                 );
+                                let acknowledgement = serde_json::json!({
+                                    "type": "subscribed",
+                                    "source": cmd.source,
+                                    "symbol": cmd.symbol,
+                                    "timeframe": cmd.timeframe
+                                });
+                                if let Err(err) = socket
+                                    .send(Message::Text(
+                                        acknowledgement.to_string().into(),
+                                    ))
+                                    .await
+                                {
+                                    info!("WebSocket subscription acknowledgement failed: {:?}", err);
+                                    break;
+                                }
                             }
 
                             Err(e) => {
