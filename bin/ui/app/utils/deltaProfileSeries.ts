@@ -1161,24 +1161,22 @@ function drawProfile(
 
     const volumeFraction = volumeScale(level.totalQty, maxVolume, options.scaleMode)
     const scaledVolumeWidth = volumeWidth * volumeFraction
+    const visibleBuyQty = options.showBuyVolume ? level.buyQty : ZERO
+    const visibleSellQty = options.showSellVolume ? level.sellQty : ZERO
+    const visibleVolume = visibleBuyQty + visibleSellQty
+    const visibleVolumeWidth = visibleVolume > ZERO
+      ? Math.max(1, scaledVolumeWidth * ratio(visibleVolume, level.totalQty))
+      : 0
     let currentX = volumeX
 
-    if (options.showBuyVolume && level.buyQty > ZERO) {
-      const buyWidth = Math.max(1, scaledVolumeWidth * ratio(level.buyQty, level.totalQty))
-      ctx.fillStyle = 'rgba(16, 185, 129, 0.82)'
-      ctx.fillRect(currentX, rowTop, Math.min(buyWidth, volumeWidth), clippedHeight)
-      currentX += Math.min(buyWidth, volumeWidth)
-    }
-
-    if (options.showSellVolume && level.sellQty > ZERO) {
-      const sellWidth = Math.max(1, scaledVolumeWidth * ratio(level.sellQty, level.totalQty))
-      ctx.fillStyle = 'rgba(244, 63, 94, 0.78)'
-      ctx.fillRect(
-        currentX,
-        rowTop,
-        Math.min(sellWidth, Math.max(0, volumeWidth - (currentX - volumeX))),
-        clippedHeight
-      )
+    if (visibleVolumeWidth > 0) {
+      ctx.fillStyle = visibleBuyQty > visibleSellQty
+        ? 'rgba(16, 185, 129, 0.82)'
+        : visibleSellQty > visibleBuyQty
+          ? 'rgba(244, 63, 94, 0.78)'
+          : 'rgba(148, 163, 184, 0.72)'
+      currentX += Math.min(visibleVolumeWidth, volumeWidth)
+      ctx.fillRect(volumeX, rowTop, currentX - volumeX, clippedHeight)
     }
 
     if (options.showDelta && level.delta !== ZERO && deltaWidth > 0) {
@@ -1210,7 +1208,12 @@ function drawProfile(
         Math.min(x + width - 31, deltaCenter + 4),
         y + 3
       )
-    } else if (options.showLabels && clippedHeight >= 12 && volumeFraction > 0.25) {
+    } else if (
+      options.showLabels
+      && clippedHeight >= 12
+      && visibleVolume > ZERO
+      && volumeFraction * ratio(visibleVolume, level.totalQty) > 0.25
+    ) {
       ctx.font = '9px ui-monospace, SFMono-Regular, monospace'
       ctx.fillStyle = 'rgba(226, 232, 240, 0.9)'
       const labelX = Math.min(currentX + 3, x + width - 86)
