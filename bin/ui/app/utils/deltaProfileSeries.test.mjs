@@ -34,6 +34,7 @@ function makeLevel(price, buy, sell, buyCount = 1, sellCount = 1) {
 
 function makeBar({
   minute = 0,
+  timeframe = '1m',
   key,
   revision = 1,
   isFinal = true,
@@ -59,11 +60,11 @@ function makeBar({
     volume: Number(total) / 10 ** SCALE,
     revision,
     is_final: isFinal,
-    event_type: 'bar.1m',
+    event_type: `bar.${timeframe}`,
     source,
     symbol,
-    timeframe: '1m',
-    bar_key: key ?? `BTCUSDT:1m:${timestamp}`,
+    timeframe,
+    bar_key: key ?? `BTCUSDT:${timeframe}:${timestamp}`,
     header: { price_scale: SCALE, quantity_scale: SCALE },
     identity: { n_trades: tradeCount, sequence_contiguous: 1, coverage_flags: 0 },
     volume_flow: {
@@ -151,6 +152,23 @@ test('converts the Binance 1m reference scales and recomputes POC', () => {
   assert.equal(result.pocVolume, 590_300_000n)
   assert.equal(result.maxPositiveDelta, 589_900_000n)
   assert.equal(result.priceScale, SCALE)
+})
+
+test('aggregates selected-timeframe bars and rejects bars from another timeframe', () => {
+  const profile = createProfile({ rollingWindowMinutes: 15 })
+  profile.reset('BTCUSDT', 'binance', '5m')
+
+  for (const minute of [0, 5, 10, 15]) {
+    assert.equal(profile.upsert(makeBar({
+      minute,
+      timeframe: '5m',
+      levels: [makeLevel(10n, BigInt(minute + 1), 0n)]
+    })), true)
+  }
+
+  assert.equal(profile.upsert(makeBar({ minute: 16, timeframe: '1m' })), false)
+  assert.equal(profile.snapshot().barsInWindow, 3)
+  assert.equal(profile.snapshot().totalBuyVolume, 33n)
 })
 
 for (const windowMinutes of [1, 5, 15, 60]) {

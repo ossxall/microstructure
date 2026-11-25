@@ -5,6 +5,15 @@ import type { Bar, BarFootprintLevel } from './bar'
 const MAX_RETAINED_BARS = 500
 const MAX_DIAGNOSTICS = 1_000
 const MINUTE_MS = 60_000
+const TIMEFRAME_MINUTES: Record<string, number> = {
+  '1m': 1,
+  '5m': 5,
+  '15m': 15,
+  '30m': 30,
+  '1h': 60,
+  '4h': 240,
+  '1d': 1_440
+}
 const ZERO = 0n
 const COVERAGE_UNKNOWN_SIDE_VALUE = 1 << 4
 
@@ -271,9 +280,9 @@ function sameStoredContribution(left: StoredBar, right: StoredBar): boolean {
 }
 
 /**
- * Maintains the rolling aggregate independently of the chart timeframe.
+ * Maintains a rolling aggregate from bars in the chart's selected timeframe.
  *
- * The engine stores only 1m footprint levels; it never reads trades/raw_ticks.
+ * The engine stores footprint levels; it never reads trades/raw_ticks.
  * Bar contributions are added/removed as the active window changes, while
  * revisions replace the prior contribution before the new one is applied.
  */
@@ -288,6 +297,7 @@ export class RollingDeltaProfile {
   private quantityScale: number | null = null
   private options: DeltaProfileOptions
   private readonly onDiagnostic?: DiagnosticHandler
+  private timeframe = '1m'
 
   constructor(
     options: Partial<DeltaProfileOptions> = {},
@@ -316,15 +326,20 @@ export class RollingDeltaProfile {
   }
 
   /**
-   * Clears data when the requested instrument changes.
+   * Clears data when the requested instrument or timeframe changes.
    */
-  reset(symbol: string | null = null, source: string | null = null): void {
+  reset(
+    symbol: string | null = null,
+    source: string | null = null,
+    timeframe = '1m'
+  ): void {
     this.bars.clear()
     this.activeBars.clear()
     this.levels.clear()
     this.reportedDiagnostics.clear()
     this.symbol = symbol
     this.source = source
+    this.timeframe = timeframe
     this.priceScale = null
     this.quantityScale = null
   }
@@ -355,8 +370,8 @@ export class RollingDeltaProfile {
   }
 
   /**
-   * Upserts a 1m bar by key/revision while allowing live updates and finality
-   * transitions that can legitimately share the same revision.
+   * Upserts a selected-timeframe bar by key/revision while allowing live
+   * updates and finality transitions that can legitimately share the same revision.
    */
   upsert(bar: Bar): boolean {
     const parsed = this.parseBar(bar)
@@ -580,10 +595,13 @@ export class RollingDeltaProfile {
       return null
     }
 
-    if ((timeframe && timeframe !== '1m') || (eventType && eventType !== 'bar.1m')) {
+    if (
+      (timeframe && timeframe !== this.timeframe)
+      || (eventType && eventType !== `bar.${this.timeframe}`)
+    ) {
       this.diagnose(
         `timeframe:${timeframe || eventType}`,
-        `Delta Profile requiere Bars 1m; se recibió ${timeframe || eventType}.`
+        `Delta Profile requiere Bars ${this.timeframe}; se recibió ${timeframe || eventType}.`
       )
       return null
     }
@@ -626,7 +644,7 @@ export class RollingDeltaProfile {
 
     const key = typeof bar.bar_key === 'string' && bar.bar_key.trim()
       ? bar.bar_key
-      : `${symbol}:1m:${Math.trunc(timestamp)}`
+      : `${symbol}:${this.timeframe}:${Math.trunc(timestamp)}`
 
     if (!bar.bar_key) {
       this.diagnose(
@@ -842,8 +860,8 @@ export class RollingDeltaProfile {
       .filter(bar => this.options.includeFormingBar || bar.isFinal)
       .sort((left, right) => left.timestamp - right.timestamp || left.key.localeCompare(right.key))
 
-    // At most one Bar per minute can contribute. If duplicate bar_keys exist
-    // for a timestamp, choose the highest revision; ties are resolved by key.
+    // At most one selected-timeframe Bar per timestamp can contribute. If
+    // duplicate bar_keys exist, choose the highest revision; ties use the key.
     const byTimestamp = new Map<number, StoredBar>()
     for (const bar of eligible) {
       const current = byTimestamp.get(bar.timestamp)
@@ -869,7 +887,12 @@ export class RollingDeltaProfile {
     let nextBars: StoredBar[] = []
 
     if (latestTimestamp !== undefined) {
-      const earliestTimestamp = latestTimestamp - (this.options.rollingWindowMinutes - 1) * MINUTE_MS
+      const timeframeMinutes = TIMEFRAME_MINUTES[this.timeframe] ?? 1
+      const coveredMinutes = Math.max(
+        0,
+        this.options.rollingWindowMinutes - timeframeMinutes
+      )
+      const earliestTimestamp = latestTimestamp - coveredMinutes * MINUTE_MS
       nextBars = uniqueBars.filter(bar => bar.timestamp >= earliestTimestamp)
     }
 
@@ -1236,7 +1259,7 @@ function drawProfile(
 /**
  * Creates an open-charts overlay. Its source data follows the chart's primary
  * timeframe so the library's time scale remains aligned; its rendered profile
- * is supplied independently by the 1m RollingDeltaProfile engine.
+ * is supplied by the RollingDeltaProfile engine from the same selected-timeframe feed.
  */
 export function createDeltaProfileSeries(
   profile: RollingDeltaProfile

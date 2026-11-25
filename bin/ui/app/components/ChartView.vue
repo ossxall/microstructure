@@ -40,8 +40,16 @@ interface HistoryResponse {
 
 const HISTORY_LIMIT = 50
 const DELTA_HISTORY_LIMIT = 15
-const DELTA_PROFILE_TIMEFRAME = '1m'
 const HISTORY_REQUEST_TIMEOUT_MS = 25_000
+const timeframeMinutes: Record<Timeframe, number> = {
+  '1m': 1,
+  '5m': 5,
+  '15m': 15,
+  '30m': 30,
+  '1h': 60,
+  '4h': 240,
+  '1d': 1_440
+}
 const sourceOptions: { label: string, value: MarketSource }[] = [
   { label: 'Binance', value: 'binance' },
   { label: 'dYdX', value: 'dydx' }
@@ -125,14 +133,43 @@ let deltaCandleSeries: AnyChartSeries | undefined
 let bidAskFlowSeries: AnyChartSeries | undefined
 let deltaProfileSeries: AnyChartSeries | undefined
 let socket: WebSocket | undefined
-let profileSocket: WebSocket | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
-let profileReconnectTimer: ReturnType<typeof setTimeout> | undefined
 let feedGeneration = 0
 let seriesHydrated = false
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function isCurrentTimeframe(nextTimeframe: Timeframe): boolean {
+  return hasSelectedInitialTimeframe.value && timeframe.value === nextTimeframe
+}
+
+function profileHistoryLimit(nextTimeframe: Timeframe): number {
+  return Math.ceil(profileSettings.rollingWindowMinutes / timeframeMinutes[nextTimeframe])
+}
+
+function matchesTimeframe(value: unknown, expectedTimeframe: Timeframe): boolean {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  const records = [
+    value,
+    ...(isRecord(value.data) ? [value.data] : [])
+  ]
+
+  return records.every((record) => {
+    const declaredTimeframe = typeof record.timeframe === 'string'
+      ? record.timeframe
+      : ''
+    const eventType = typeof record.event_type === 'string'
+      ? record.event_type
+      : ''
+
+    return (!declaredTimeframe || declaredTimeframe === expectedTimeframe)
+      && (!eventType.startsWith('bar.') || eventType === `bar.${expectedTimeframe}`)
+  })
 }
 
 function numberValue(value: unknown): number {
@@ -452,9 +489,13 @@ function renderCurrentBars() {
 async function fetchMarketHistory(
   nextSource: MarketSource,
   nextSymbol: string,
-  nextTimeframe: string,
+  nextTimeframe: Timeframe,
   options: { limit?: number, includeRawTicks?: boolean } = {}
 ): Promise<Bar[]> {
+  if (!isCurrentTimeframe(nextTimeframe)) {
+    return []
+  }
+
   const response = await $fetch<HistoryResponse>('/api/market/get-history', {
     method: 'POST',
     timeout: HISTORY_REQUEST_TIMEOUT_MS,
@@ -472,6 +513,7 @@ async function fetchMarketHistory(
   }
 
   return (response.data?.history ?? [])
+    .filter(bar => matchesTimeframe(bar, nextTimeframe))
     .map(parseMarketBar)
     .filter((bar): bar is Bar => bar !== null)
 }
@@ -479,8 +521,12 @@ async function fetchMarketHistory(
 async function fetchDeltaHistory(
   nextSource: MarketSource,
   nextSymbol: string,
-  nextTimeframe: string
+  nextTimeframe: Timeframe
 ): Promise<DeltaBar[]> {
+  if (!isCurrentTimeframe(nextTimeframe)) {
+    return []
+  }
+
   const response = await $fetch<HistoryResponse>('/api/market/get-history', {
     method: 'POST',
     timeout: HISTORY_REQUEST_TIMEOUT_MS,
@@ -498,6 +544,7 @@ async function fetchDeltaHistory(
   }
 
   return (response.data?.history ?? [])
+    .filter(bar => matchesTimeframe(bar, nextTimeframe))
     .map(parseDeltaBar)
     .filter((bar): bar is DeltaBar => bar !== null)
 }
@@ -526,18 +573,26 @@ function upsertDeltaProfileBar(bar: Bar): boolean {
 async function resyncDeltaProfileHistory(
   nextSource: MarketSource,
   nextSymbol: string,
+  nextTimeframe: Timeframe,
   generation: number,
-  limit = profileSettings.rollingWindowMinutes
+  limit = profileHistoryLimit(nextTimeframe)
 ) {
+  if (generation !== feedGeneration || !isCurrentTimeframe(nextTimeframe)) {
+    return
+  }
+
   try {
     const history = await fetchMarketHistory(
       nextSource,
       nextSymbol,
-      DELTA_PROFILE_TIMEFRAME,
+      nextTimeframe,
       { limit, includeRawTicks: false }
     )
 
-    if (generation !== feedGeneration) {
+    if (
+      generation !== feedGeneration
+      || !isCurrentTimeframe(nextTimeframe)
+    ) {
       return
     }
 
@@ -549,109 +604,9 @@ async function resyncDeltaProfileHistory(
   } catch (error) {
     if (generation === feedGeneration) {
       profileDiagnostic.value = error instanceof Error
-        ? `No se pudo resincronizar el histórico 1m del Delta Profile: ${error.message}`
-        : 'No se pudo resincronizar el histórico 1m del Delta Profile'
+        ? `No se pudo resincronizar el histórico ${nextTimeframe} del Delta Profile: ${error.message}`
+        : `No se pudo resincronizar el histórico ${nextTimeframe} del Delta Profile`
     }
-  }
-}
-
-function stopDeltaProfileWebSocket() {
-  if (profileReconnectTimer) {
-    clearTimeout(profileReconnectTimer)
-    profileReconnectTimer = undefined
-  }
-
-  const currentSocket = profileSocket
-  profileSocket = undefined
-  currentSocket?.close()
-}
-
-function connectDeltaProfileWebSocket(
-  nextSource: MarketSource,
-  nextSymbol: string,
-  generation: number,
-  resyncAfterConnect = false
-) {
-  if (generation !== feedGeneration) {
-    return
-  }
-
-  try {
-    const nextSocket = new WebSocket(String(config.public.marketWebSocketUrl))
-    profileSocket = nextSocket
-
-    nextSocket.addEventListener('open', () => {
-      if (profileSocket !== nextSocket || generation !== feedGeneration) {
-        return
-      }
-
-      nextSocket.send(JSON.stringify({
-        action: 'subscribe',
-        source: nextSource,
-        symbol: nextSymbol,
-        timeframe: DELTA_PROFILE_TIMEFRAME
-      }))
-    })
-
-    nextSocket.addEventListener('message', (event: MessageEvent<string>) => {
-      if (generation !== feedGeneration) {
-        return
-      }
-
-      try {
-        const message: unknown = JSON.parse(event.data)
-
-        if (
-          isRecord(message)
-          && message.type === 'subscribed'
-          && message.source === nextSource
-          && message.symbol === nextSymbol
-          && message.timeframe === DELTA_PROFILE_TIMEFRAME
-        ) {
-          if (resyncAfterConnect) {
-            void resyncDeltaProfileHistory(
-              nextSource,
-              nextSymbol,
-              generation,
-              profileSettings.rollingWindowMinutes
-            )
-          }
-          return
-        }
-
-        if (isRecord(message) && message.type === 'error') {
-          profileDiagnostic.value = typeof message.message === 'string'
-            ? `Feed 1m del Delta Profile: ${message.message}`
-            : 'El feed 1m del Delta Profile rechazó la suscripción'
-          return
-        }
-
-        const deltaBar = parseDeltaBar(message)
-        if (deltaBar && timeframe.value === DELTA_PROFILE_TIMEFRAME) {
-          upsertDeltaBar(deltaBar)
-        }
-
-        const bar = parseMarketBar(message)
-        if (bar) {
-          upsertDeltaProfileBar(bar)
-        }
-      } catch {
-        profileDiagnostic.value = 'El feed 1m envió un mensaje inválido al Delta Profile'
-      }
-    })
-
-    nextSocket.addEventListener('close', () => {
-      if (profileSocket !== nextSocket || generation !== feedGeneration) {
-        return
-      }
-
-      profileSocket = undefined
-      profileReconnectTimer = setTimeout(() => {
-        connectDeltaProfileWebSocket(nextSource, nextSymbol, generation, true)
-      }, 1500)
-    })
-  } catch {
-    profileDiagnostic.value = 'No se pudo conectar el feed 1m del Delta Profile'
   }
 }
 
@@ -661,6 +616,10 @@ async function resyncMarketHistory(
   nextTimeframe: Timeframe,
   generation: number
 ) {
+  if (generation !== feedGeneration || !isCurrentTimeframe(nextTimeframe)) {
+    return
+  }
+
   try {
     const history = await fetchMarketHistory(nextSource, nextSymbol, nextTimeframe, {
       includeRawTicks: false
@@ -668,6 +627,14 @@ async function resyncMarketHistory(
 
     if (generation !== feedGeneration) {
       return
+    }
+
+    let profileChanged = false
+    for (const bar of history) {
+      profileChanged = deltaProfile.upsert(bar) || profileChanged
+    }
+    if (profileChanged) {
+      refreshDeltaProfile()
     }
 
     const changedBars = history.filter(upsertBar)
@@ -702,6 +669,10 @@ async function resyncDeltaHistory(
   nextTimeframe: Timeframe,
   generation: number
 ) {
+  if (generation !== feedGeneration || !isCurrentTimeframe(nextTimeframe)) {
+    return
+  }
+
   try {
     const history = await fetchDeltaHistory(nextSource, nextSymbol, nextTimeframe)
 
@@ -741,7 +712,7 @@ function connectWebSocket(
   generation: number,
   resyncAfterConnect = false
 ) {
-  if (generation !== feedGeneration) {
+  if (generation !== feedGeneration || !isCurrentTimeframe(nextTimeframe)) {
     return
   }
 
@@ -787,6 +758,14 @@ function connectWebSocket(
               nextTimeframe,
               generation
             )
+            if (profileHistoryLimit(nextTimeframe) > HISTORY_LIMIT) {
+              void resyncDeltaProfileHistory(
+                nextSource,
+                nextSymbol,
+                nextTimeframe,
+                generation
+              )
+            }
             void resyncDeltaHistory(
               nextSource,
               nextSymbol,
@@ -804,6 +783,10 @@ function connectWebSocket(
           return
         }
 
+        if (!matchesTimeframe(message, nextTimeframe)) {
+          return
+        }
+
         const deltaBar = parseDeltaBar(message)
         if (deltaBar) {
           upsertDeltaBar(deltaBar)
@@ -811,7 +794,8 @@ function connectWebSocket(
 
         const bar = parseMarketBar(message)
 
-        if (bar) {
+        if (bar && matchesTimeframe(bar, nextTimeframe)) {
+          upsertDeltaProfileBar(bar)
           if (upsertBar(bar) && seriesHydrated) {
             series?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
             attackBubbleSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
@@ -850,7 +834,7 @@ async function loadMarketData(
   nextSymbol: string,
   nextTimeframe: Timeframe
 ) {
-  if (!hasSelectedInitialTimeframe.value) {
+  if (!isCurrentTimeframe(nextTimeframe)) {
     return
   }
 
@@ -868,14 +852,12 @@ async function loadMarketData(
   latestBarState.value = 'none'
   profileDiagnostic.value = ''
   profileBarCount.value = 0
-  deltaProfile.reset(nextSymbol, nextSource)
+  deltaProfile.reset(nextSymbol, nextSource, nextTimeframe)
   stopWebSocket()
-  stopDeltaProfileWebSocket()
   replaceSeries()
   replaceDeltaCandleSeries()
   replaceBidAskFlowSeries()
   connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
-  connectDeltaProfileWebSocket(nextSource, nextSymbol, generation)
   void resyncDeltaHistory(nextSource, nextSymbol, nextTimeframe, generation)
 
   try {
@@ -889,20 +871,12 @@ async function loadMarketData(
 
     for (const bar of history) {
       upsertBar(bar)
-      if (nextTimeframe === DELTA_PROFILE_TIMEFRAME) {
-        deltaProfile.upsert(bar)
-      }
+      upsertDeltaProfileBar(bar)
     }
 
     renderCurrentBars()
-    if (nextTimeframe === DELTA_PROFILE_TIMEFRAME) {
-      refreshDeltaProfile()
-    }
-    if (
-      nextTimeframe !== DELTA_PROFILE_TIMEFRAME
-      || profileSettings.rollingWindowMinutes > HISTORY_LIMIT
-    ) {
-      void resyncDeltaProfileHistory(nextSource, nextSymbol, generation)
+    if (profileHistoryLimit(nextTimeframe) > HISTORY_LIMIT) {
+      void resyncDeltaProfileHistory(nextSource, nextSymbol, nextTimeframe, generation)
     }
   } catch (error) {
     if (generation === feedGeneration) {
@@ -910,12 +884,15 @@ async function loadMarketData(
         ? `Histórico: ${error.message}`
         : 'No se pudo cargar el histórico'
       renderCurrentBars()
-      void resyncDeltaProfileHistory(
-        nextSource,
-        nextSymbol,
-        generation,
-        profileSettings.rollingWindowMinutes
-      )
+      if (profileHistoryLimit(nextTimeframe) > HISTORY_LIMIT) {
+        void resyncDeltaProfileHistory(
+          nextSource,
+          nextSymbol,
+          nextTimeframe,
+          generation,
+          profileHistoryLimit(nextTimeframe)
+        )
+      }
     }
   } finally {
     if (generation === feedGeneration) {
@@ -972,17 +949,15 @@ function applyDeltaProfileSettings() {
   deltaProfileSeries?.setParams({ ...profileSettings })
   refreshDeltaProfile(true)
   if (
-    (
-      timeframe.value === DELTA_PROFILE_TIMEFRAME
-      && profileSettings.rollingWindowMinutes > HISTORY_LIMIT
-    )
-    || timeframe.value !== DELTA_PROFILE_TIMEFRAME
+    isCurrentTimeframe(timeframe.value)
+    && profileHistoryLimit(timeframe.value) > HISTORY_LIMIT
   ) {
     void resyncDeltaProfileHistory(
       source.value,
       symbol.value,
+      timeframe.value,
       feedGeneration,
-      profileSettings.rollingWindowMinutes
+      profileHistoryLimit(timeframe.value)
     )
   }
 }
@@ -1027,7 +1002,6 @@ onBeforeUnmount(() => {
   unsubscribeChartEvents?.()
   unsubscribeChartEvents = undefined
   stopWebSocket()
-  stopDeltaProfileWebSocket()
   chart?.api.destroy()
   deltaChart?.api.destroy()
   bidAskFlowChart?.api.destroy()
@@ -1195,7 +1169,7 @@ onBeforeUnmount(() => {
         <summary class="cursor-pointer text-sm font-semibold text-highlighted">
           DELTA PROFILE — ROLLING WINDOW
           <span class="ml-2 text-xs font-normal text-muted">
-            Fuente 1m · {{ profileSettings.rollingWindowMinutes }} min · {{ profileBarCount }} Bars
+            Fuente {{ timeframe }} · {{ profileSettings.rollingWindowMinutes }} min · {{ profileBarCount }} Bars
           </span>
         </summary>
 
@@ -1365,7 +1339,7 @@ onBeforeUnmount(() => {
               Actualizar ahora
             </button>
             <span class="text-xs text-muted">
-              Solo footprint de Bars 1m; incluye la Bar live mientras está en formación.
+              Usa el footprint de Bars {{ timeframe }} del feed principal; incluye la Bar live mientras está en formación.
             </span>
           </div>
         </form>
@@ -1467,7 +1441,7 @@ onBeforeUnmount(() => {
       <span>{{ source }} · {{ symbol }} · {{ timeframe }}</span>
       <div class="flex flex-wrap items-center gap-3">
         <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
-          Delta Profile 1m · {{ profileSettings.rollingWindowMinutes }}m · {{ profileBarCount }} Bars
+          Delta Profile {{ timeframe }} · {{ profileSettings.rollingWindowMinutes }}m · {{ profileBarCount }} Bars
         </span>
         <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
           Ataques · {{ attackBubbleCount }}
