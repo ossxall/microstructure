@@ -19,8 +19,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DEFAULT_QUESTDB_MAX_BUF_SIZE_BYTES: usize = 32 * 1024 * 1024;
-const DEFAULT_QUESTDB_SF_MAX_SEGMENT_BYTES: u64 = 32 * 1024 * 1024;
+const MIN_QUESTDB_MAX_BUF_SIZE_BYTES: usize = 32 * 1024 * 1024;
+const MIN_QUESTDB_SF_MAX_SEGMENT_BYTES: u64 = 32 * 1024 * 1024;
+const DEFAULT_QUESTDB_MAX_BUF_SIZE_BYTES: usize = 128 * 1024 * 1024;
+const DEFAULT_QUESTDB_SF_MAX_SEGMENT_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_LIVE_POLL_INTERVAL_MS: u64 = 1_000;
 
 #[derive(Debug, Clone)]
@@ -104,10 +106,10 @@ impl Config {
         {
             bail!("QUESTDB_SF_DIR must be a non-empty path without semicolons");
         }
-        if config.questdb_max_buf_size_bytes < DEFAULT_QUESTDB_MAX_BUF_SIZE_BYTES {
+        if config.questdb_max_buf_size_bytes < MIN_QUESTDB_MAX_BUF_SIZE_BYTES {
             bail!("QUESTDB_MAX_BUF_SIZE_BYTES must be at least 33554432 (32 MiB)");
         }
-        if config.questdb_sf_max_segment_bytes < DEFAULT_QUESTDB_SF_MAX_SEGMENT_BYTES {
+        if config.questdb_sf_max_segment_bytes < MIN_QUESTDB_SF_MAX_SEGMENT_BYTES {
             bail!("QUESTDB_SF_MAX_SEGMENT_BYTES must be at least 33554432 (32 MiB)");
         }
         ensure!(

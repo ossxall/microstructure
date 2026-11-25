@@ -19,8 +19,8 @@ services:
     restart: unless-stopped
     environment:
       QDB_CAIRO_COMMIT_MODE: adaptive
-      # QWP write-frame ceiling is about 16 MiB; event payloads are several MiB.
-      QDB_HTTP_RECV_BUFFER_SIZE: 16M
+      # 17 MiB allows the full 16 MiB QWP protocol ceiling (recv buffer minus framing).
+      QDB_HTTP_RECV_BUFFER_SIZE: 17M
       # SQL/QWP egress must return a complete large outbox row.
       QDB_HTTP_SEND_BUFFER_SIZE: 64M
     ports:

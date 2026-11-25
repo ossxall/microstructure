@@ -107,7 +107,9 @@ fn query_history(
             let payload = values
                 .value(row)
                 .context("QuestDB returned a null bar payload")?;
-            let mut bar = serde_json::from_str::<Value>(payload)
+            let decoded_payload = crate::payload_codec::decode(payload)
+                .context("QuestDB bar payload could not be decompressed")?;
+            let mut bar = serde_json::from_str::<Value>(&decoded_payload)
                 .context("QuestDB returned an invalid bar payload")?;
             if !include_raw_ticks {
                 strip_raw_ticks(&mut bar);

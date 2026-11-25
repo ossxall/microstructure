@@ -56,15 +56,19 @@ precedence. The shared `ticks` table must be populated by the merger. Set
 - For finalized bars, the bar and a pending event-outbox row are written to
   QuestDB before the event is sent, using separate durable QWP flushes. Each individual row must
   still fit in one QWP frame. The aggregator configures both `max_buf_size` and
-  `sf_max_segment_bytes` to 32 MiB by default. The development QuestDB service
-  in `infra.yaml` sets `http.recv.buffer.size` to 16 MiB for QWP writes (the
-  effective single-frame cap) and `http.send.buffer.size` to 64 MiB for query
-  results. The send buffer must exceed the largest outbox payload; QuestDB's
-  2 MiB default cannot return a single larger event row. Configure adequate
-  limits in external deployments too. Compose applies these values when the
-  containers start, so recreate QuestDB after changing them. If a row exceeds
-  the effective frame or send-buffer limit, processing/publishing fails and
-  retries on the next poll. If the process stops between the two writes,
+  `sf_max_segment_bytes` to 128 MiB by default. The development QuestDB service
+  in `infra.yaml` sets `http.recv.buffer.size` to 17 MiB, enough for QuestDB
+  10.2's hard 16 MiB QWP frame ceiling after framing overhead, and
+  `http.send.buffer.size` to 64 MiB for query results. Increasing the receive
+  buffer cannot raise that protocol ceiling. Large JSON payloads are gzip
+  compressed and Base64 encoded in QuestDB, then transparently decoded by the
+  aggregator and history API; Pulsar events and API responses remain ordinary
+  JSON. Direct SQL readers of `payload` must decode values prefixed with
+  `gzip+base64:`. Legacy uncompressed rows remain readable. The send buffer
+  must exceed the largest outbox payload; QuestDB's 2 MiB default cannot return
+  a single larger event row. Configure adequate limits in external deployments
+  too. Compose applies these values when the containers start, so recreate
+  QuestDB after changing them. If the process stops between the two writes,
   rescanning the bucket repairs the missing outbox row. Event delivery is **at
   least once**; consumers should deduplicate using `event_id`, which is stable
   for a bar revision.
@@ -167,8 +171,8 @@ and do not share it between active instances for the same timeframe.
 | `AGGREGATOR_TIMEFRAME` | `1m` | Timeframe this worker owns; the sample `.env.example` sets `5m` |
 | `QUESTDB_CONNECT` | `ws::addr=localhost:9000` | QuestDB QWP connection |
 | `QUESTDB_SF_DIR` | `./data/questdb-sf` | Persistent QuestDB client store-and-forward directory |
-| `QUESTDB_MAX_BUF_SIZE_BYTES` | `33554432` | Maximum encoded QuestDB client buffer size; must be at least 32 MiB and no smaller than the segment size |
-| `QUESTDB_SF_MAX_SEGMENT_BYTES` | `33554432` | QuestDB store-and-forward segment size; must be at least 32 MiB |
+| `QUESTDB_MAX_BUF_SIZE_BYTES` | `134217728` | Maximum encoded QuestDB client buffer size; must be at least 32 MiB and no smaller than the segment size |
+| `QUESTDB_SF_MAX_SEGMENT_BYTES` | `134217728` | QuestDB store-and-forward segment size; must be at least 32 MiB |
 | `POLL_INTERVAL_SECONDS` | `60` | Aggregator polling cadence |
 | `LIVE_POLL_INTERVAL_MS` | `1000` | Live bar snapshot cadence in milliseconds; must be greater than zero |
 | `ALLOWED_LATENESS_SECONDS` | `5` | Delay after timeframe close before first calculation |

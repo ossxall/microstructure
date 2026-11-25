@@ -13,7 +13,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::model::{Bar, Tick, decimal_string};
+use crate::{
+    model::{Bar, Tick, decimal_string},
+    payload_codec,
+};
 use anyhow::{Context, Result, ensure};
 use questdb::{
     QuestDb,
@@ -306,10 +309,11 @@ pub fn existing_bars(
                 ),
                 ExistingBar {
                     revision: u64::try_from(revisions.value(row))?,
-                    payload: payloads
-                        .value(row)
-                        .context("Existing bar payload is null")?
-                        .to_string(),
+                    payload: payload_codec::decode(
+                        payloads
+                            .value(row)
+                            .context("Existing bar payload is null")?,
+                    )?,
                 },
             );
         }
@@ -328,6 +332,7 @@ pub fn persist_bar(db: &QuestDb, timeframe: &str, bar: &Bar, event_id: &str) -> 
         .context("Failed to borrow QuestDB sender")?;
     let mut buffer = sender.new_buffer();
     let table = bars_table_name(timeframe);
+    let payload = payload_codec::encode(&serde_json::to_string(bar)?)?;
 
     buffer
         .table(table.as_str())?
@@ -335,7 +340,7 @@ pub fn persist_bar(db: &QuestDb, timeframe: &str, bar: &Bar, event_id: &str) -> 
         .symbol("symbol", bar.symbol.as_str())?
         .column_i64("revision", i64::try_from(bar.revision)?)?
         .column_str("event_id", event_id)?
-        .column_str("payload", serde_json::to_string(bar)?)?
+        .column_str("payload", payload.as_str())?
         .at(TimestampMicros::new(time_us))?;
 
     sender
@@ -360,13 +365,14 @@ pub fn persist_pending_event(
         .context("Failed to borrow QuestDB outbox sender")?;
     let mut buffer = sender.new_buffer();
     let table = event_table_name(timeframe);
+    let stored_payload = payload_codec::encode(event_payload)?;
     buffer
         .table(table.as_str())?
         .column_str("event_id", event_id)?
         .symbol("source", bar.source.as_str())?
         .symbol("symbol", bar.symbol.as_str())?
         .column_i64("revision", i64::try_from(bar.revision)?)?
-        .column_str("payload", event_payload)?
+        .column_str("payload", stored_payload.as_str())?
         .column_bool("published", false)?
         .at(TimestampMicros::new(time_us))?;
 
@@ -461,10 +467,9 @@ pub fn pending_events(db: &QuestDb, timeframe: &str) -> Result<Vec<PendingEvent>
                     .to_string(),
                 timeframe: timeframe.to_string(),
                 revision: u64::try_from(revisions.value(row))?,
-                payload: payloads
-                    .value(row)
-                    .context("Outbox payload is null")?
-                    .to_string(),
+                payload: payload_codec::decode(
+                    payloads.value(row).context("Outbox payload is null")?,
+                )?,
             });
         }
     }
@@ -477,13 +482,14 @@ pub fn mark_event_published(db: &QuestDb, timeframe: &str, event: &PendingEvent)
         .context("Failed to borrow QuestDB outbox sender")?;
     let mut buffer = sender.new_buffer();
     let table = event_table_name(timeframe);
+    let stored_payload = payload_codec::encode(event.payload.as_str())?;
     buffer
         .table(table.as_str())?
         .column_str("event_id", event.event_id.as_str())?
         .symbol("source", event.source.as_str())?
         .symbol("symbol", event.symbol.as_str())?
         .column_i64("revision", i64::try_from(event.revision)?)?
-        .column_str("payload", event.payload.as_str())?
+        .column_str("payload", stored_payload.as_str())?
         .column_bool("published", true)?
         .at(TimestampMicros::new(event.time_us))?;
     sender

@@ -15,6 +15,8 @@
 
 mod config;
 mod model;
+#[path = "../../shared/payload_codec.rs"]
+mod payload_codec;
 mod persistence;
 mod registry;
 
@@ -730,8 +732,8 @@ mod tests {
             timeframe_ms: 60_000,
             questdb_connect: "ws::addr=localhost:9000".to_string(),
             questdb_sf_dir: PathBuf::from("/tmp/aggregator-sf"),
-            questdb_max_buf_size_bytes: 32 * 1024 * 1024,
-            questdb_sf_max_segment_bytes: 32 * 1024 * 1024,
+            questdb_max_buf_size_bytes: 128 * 1024 * 1024,
+            questdb_sf_max_segment_bytes: 128 * 1024 * 1024,
             id_registry_path: PathBuf::from("/tmp/aggregator-ids.json"),
             poll_interval_seconds: 60,
             live_poll_interval_ms: 1_000,
@@ -740,11 +742,11 @@ mod tests {
         };
 
         let connect_string = questdb_connect_string(&config);
-        assert!(connect_string.contains("max_buf_size=33554432"));
-        assert!(connect_string.contains("sf_max_segment_bytes=33554432"));
+        assert!(connect_string.contains("max_buf_size=134217728"));
+        assert!(connect_string.contains("sf_max_segment_bytes=134217728"));
         assert!(
             questdb::ingress::SenderBuilder::from_conf(
-                "ws::addr=localhost:9000;max_buf_size=33554432;sf_max_segment_bytes=33554432;"
+                "ws::addr=localhost:9000;max_buf_size=134217728;sf_max_segment_bytes=134217728;"
             )
             .is_ok()
         );
