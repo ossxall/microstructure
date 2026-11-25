@@ -74,7 +74,9 @@ const deltaChartHost = ref<HTMLElement | null>(null)
 const bidAskFlowChartHost = ref<HTMLElement | null>(null)
 const source = ref<MarketSource>('binance')
 const symbol = ref('BTCUSDT')
-const timeframe = ref<Timeframe>('1m')
+const timeframe = ref<Timeframe>('5m')
+const initialTimeframe = ref<Timeframe>('5m')
+const hasSelectedInitialTimeframe = ref(false)
 const draftSource = ref<MarketSource>(source.value)
 const draftSymbol = ref(symbol.value)
 const draftTimeframe = ref<Timeframe>(timeframe.value)
@@ -848,6 +850,10 @@ async function loadMarketData(
   nextSymbol: string,
   nextTimeframe: Timeframe
 ) {
+  if (!hasSelectedInitialTimeframe.value) {
+    return
+  }
+
   const generation = ++feedGeneration
   isLoading.value = true
   errorMessage.value = ''
@@ -916,6 +922,13 @@ async function loadMarketData(
       isLoading.value = false
     }
   }
+}
+
+function startChartWithSelectedTimeframe() {
+  timeframe.value = initialTimeframe.value
+  draftTimeframe.value = initialTimeframe.value
+  hasSelectedInitialTimeframe.value = true
+  void loadMarketData(source.value, symbol.value, timeframe.value)
 }
 
 async function applySettings() {
@@ -1007,7 +1020,6 @@ onMounted(() => {
     bidAskFlowChart = createChart(bidAskFlowChartHost.value)
     replaceBidAskFlowSeries()
   }
-  void loadMarketData(source.value, symbol.value, timeframe.value)
 })
 
 onBeforeUnmount(() => {
@@ -1031,8 +1043,70 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <Teleport to="body">
+    <div
+      v-if="!hasSelectedInitialTimeframe"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+    >
+      <section
+        class="w-full max-w-xl rounded-2xl border border-default bg-default p-6 shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="initial-timeframe-title"
+        aria-describedby="initial-timeframe-description"
+      >
+        <p class="text-sm font-medium text-primary">
+          Configuración del chart
+        </p>
+        <h2
+          id="initial-timeframe-title"
+          class="mt-2 text-2xl font-semibold text-highlighted"
+        >
+          ¿Qué timeframe quieres cargar?
+        </h2>
+        <p
+          id="initial-timeframe-description"
+          class="mt-2 text-sm text-muted"
+        >
+          El historial y los feeds en vivo se cargarán después de confirmar. 5m está preseleccionado; puedes elegir otro timeframe.
+        </p>
+
+        <div
+          class="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4"
+          role="group"
+          aria-label="Timeframes disponibles"
+        >
+          <button
+            v-for="option in timeframeOptions"
+            :key="option.value"
+            type="button"
+            class="min-h-11 rounded-lg border px-4 text-sm font-semibold transition-colors"
+            :class="initialTimeframe === option.value
+              ? 'border-primary bg-primary/10 text-highlighted'
+              : 'border-default bg-elevated/30 text-muted hover:bg-elevated/60'"
+            :aria-pressed="initialTimeframe === option.value"
+            @click="initialTimeframe = option.value"
+          >
+            {{ option.label }}
+          </button>
+        </div>
+
+        <div class="mt-6 flex justify-end">
+          <button
+            type="button"
+            class="min-h-10 rounded-lg bg-primary px-5 text-sm font-semibold text-inverted"
+            @click="startChartWithSelectedTimeframe"
+          >
+            Cargar chart {{ initialTimeframe }}
+          </button>
+        </div>
+      </section>
+    </div>
+  </Teleport>
+
   <section
     class="flex min-h-screen flex-col gap-4 p-4 sm:p-6"
+    :inert="!hasSelectedInitialTimeframe"
     aria-labelledby="chart-title"
   >
     <header class="flex flex-col gap-4">
