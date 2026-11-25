@@ -1,11 +1,11 @@
 CREATE TABLE IF NOT EXISTS ticks (
-    time TIMESTAMP,
+    timestamp TIMESTAMP,
     source SYMBOL,
     symbol SYMBOL,
     id VARCHAR,
     price LONG,
     qty LONG,
     is_buyer_maker SHORT
-) TIMESTAMP(time)
+) TIMESTAMP(timestamp)
 PARTITION BY DAY
-DEDUP UPSERT KEYS (time, source, symbol, id);
+DEDUP UPSERT KEYS (timestamp, source, symbol, id);

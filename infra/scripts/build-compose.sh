@@ -1,0 +1,1 @@
+docker compose -f infra.yaml up -d --build --force-recreate

@@ -104,8 +104,8 @@ pub fn load_ticks(db: &QuestDb, start_us: i64, end_us: i64) -> Result<Vec<Tick>>
         .context("Failed to open QuestDB tick reader")?;
     let mut cursor = reader
         .prepare(
-            "SELECT time, source, symbol, id, price, qty, is_buyer_maker \
-             FROM ticks WHERE time >= $1 AND time < $2 ORDER BY time, id",
+            "SELECT timestamp, source, symbol, id, price, qty, is_buyer_maker \
+             FROM ticks WHERE timestamp >= $1 AND timestamp < $2 ORDER BY timestamp, id",
         )
         .bind_timestamp_micros(start_us)
         .bind_timestamp_micros(end_us)
@@ -181,7 +181,7 @@ pub fn load_ticks(db: &QuestDb, start_us: i64, end_us: i64) -> Result<Vec<Tick>>
 }
 
 pub fn first_tick_time(db: &QuestDb) -> Result<Option<i64>> {
-    read_timestamp_scalar(db, "SELECT min(time) FROM ticks")
+    read_timestamp_scalar(db, "SELECT min(timestamp) FROM ticks")
 }
 
 fn read_timestamp_scalar(db: &QuestDb, sql: &str) -> Result<Option<i64>> {
