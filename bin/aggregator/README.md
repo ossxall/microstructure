@@ -2,8 +2,9 @@
 
 Builds bars for its configured timeframe from the shared `ticks` table in
 QuestDB, stores them in timeframe-isolated tables, and publishes each JSON event
-to a source/symbol/timeframe-specific Pulsar topic. The default timeframe is
-`1m`; supported timeframes are `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1d`.
+to a source/symbol/timeframe-specific Pulsar topic. The code default timeframe is
+`1m`; the sample `.env.example` explicitly configures `5m`. Supported timeframes
+are `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1d`.
 While a timeframe window is open, it also publishes a complete live snapshot
 once per `LIVE_POLL_INTERVAL_MS` when the bar has changed. The default interval
 is one second.
@@ -19,10 +20,11 @@ cargo run --manifest-path bin/aggregator/Cargo.toml
 
 The process reads `.env.dev` from this directory; environment variables take
 precedence. The shared `ticks` table must be populated by the merger. Set
-`AGGREGATOR_TIMEFRAME` independently for each worker. The default `1m` worker
-uses `bars_1m`, `bar_events` (the event outbox), and `aggregator_state`; other
-timeframes use suffixed names, for example `bars_5m`, `bar_events_5m`, and
-`aggregator_state_5m`.
+`AGGREGATOR_TIMEFRAME` independently for each worker. If unset, the code uses
+`1m`; copying the sample `.env.example` to `.env.dev` configures this worker for
+`5m`. The `1m` worker uses `bars_1m`, `bar_events` (the event outbox), and
+`aggregator_state`; other timeframes use suffixed names, for example `bars_5m`,
+`bar_events_5m`, and `aggregator_state_5m`.
 
 ## Processing and delivery
 
@@ -162,7 +164,7 @@ and do not share it between active instances for the same timeframe.
 | --- | --- | --- |
 | `PULSAR_URL` | `pulsar://localhost:6650` | Pulsar broker |
 | `PULSAR_NAMESPACE` | `persistent://public/default` | Namespace prefix for per-source/symbol/timeframe bar topics |
-| `AGGREGATOR_TIMEFRAME` | `1m` | Timeframe this worker owns: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, or `1d` |
+| `AGGREGATOR_TIMEFRAME` | `1m` | Timeframe this worker owns; the sample `.env.example` sets `5m` |
 | `QUESTDB_CONNECT` | `ws::addr=localhost:9000` | QuestDB QWP connection |
 | `QUESTDB_SF_DIR` | `./data/questdb-sf` | Persistent QuestDB client store-and-forward directory |
 | `QUESTDB_MAX_BUF_SIZE_BYTES` | `33554432` | Maximum encoded QuestDB client buffer size; must be at least 32 MiB and no smaller than the segment size |

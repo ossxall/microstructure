@@ -12,7 +12,7 @@ http:
       {
         "source": "binance",
         "symbol": "BTCUSDT",
-        "timeframe": "1m",
+        "timeframe": "5m",
         "limit": 500
       }
   auth: inherit

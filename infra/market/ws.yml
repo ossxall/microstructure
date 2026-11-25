@@ -12,7 +12,7 @@ websocket:
         "action": "subscribe",
         "source": "binance",
         "symbol": "BTCUSDT",
-        "timeframe": "1m"
+        "timeframe": "5m"
       }
   auth: inherit
 

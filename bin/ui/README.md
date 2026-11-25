@@ -65,7 +65,7 @@ const wasm = await loadBasicWasm()
 const result = wasm.add(2, 3) // 5
 ```
 
-La vista de chart obtiene las últimas 50 barras del timeframe seleccionado de
+La vista de chart inicia en `1m` y obtiene las últimas 50 barras del timeframe seleccionado de
 `POST /api/market/get-history` y se suscribe al WebSocket `/api/market/ws` con
 el mismo `source`, `symbol` y `timeframe`. La consulta histórica omite
 `raw_ticks` para evitar respuestas de cientos de MB; el Institutional Trade
