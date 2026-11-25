@@ -11,7 +11,7 @@ const items: { view: AppView, label: string, icon: string }[] = [{
 </script>
 
 <template>
-  <aside class="flex min-h-screen w-20 shrink-0 flex-col border-r border-default bg-default px-2 py-4">
+  <aside class="flex min-h-screen w-16 shrink-0 flex-col border-r border-default bg-default px-2 py-4">
     <nav
       aria-label="Main navigation"
       class="flex flex-col gap-2"
