@@ -6,7 +6,7 @@
 # Stop with:  docker compose -f infra.yaml down
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.12-alpine
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
@@ -29,7 +29,7 @@ services:
       - questdb-data:/var/lib/questdb
 
   oxia:
-    image: oxia/oxia:latest
+    image: oxia/oxia:0.18.0
     command: ["oxia", "standalone"]
     restart: unless-stopped
     volumes:
