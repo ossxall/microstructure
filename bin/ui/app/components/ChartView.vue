@@ -136,6 +136,7 @@ watch(activeTab, async (tab) => {
 })
 
 const config = useRuntimeConfig()
+const colorMode = useColorMode()
 const bars = new Map<number, Bar>()
 const deltaBars = new Map<number, DeltaBar>()
 let deltaCvdBase = 0
@@ -155,6 +156,64 @@ let deltaProfileSeries: AnyChartSeries | undefined
 let socket: WebSocket | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 let feedGeneration = 0
+
+const chartColorPalettes = {
+  dark: {
+    bg: '#0a0a0a',
+    bg2: '#0a0a0a',
+    bg3: 'rgba(255,255,255,0.1)',
+    grid: 'rgba(64,64,64,0.5)',
+    gridAlt: 'rgba(64,64,64,0.65)',
+    text: '#d4d4d4',
+    textDim: '#a3a3a3',
+    line: '#00a155',
+    area1: 'rgba(0,161,85,0.28)',
+    area2: 'rgba(0,161,85,0)',
+    bb: '#00a155',
+    bbFill: 'rgba(0,161,85,0.05)',
+    cross: 'rgba(163,163,163,0.25)',
+    crossPt: '#00a155',
+    vol: 'rgba(163,163,163,0.25)',
+    accent: '#00a155'
+  },
+  light: {
+    bg: '#ffffff',
+    bg2: '#fafafa',
+    bg3: 'rgba(0,0,0,0.08)',
+    grid: 'rgba(163,163,163,0.35)',
+    gridAlt: 'rgba(163,163,163,0.5)',
+    text: '#171717',
+    textDim: '#737373',
+    line: '#008f5a',
+    area1: 'rgba(0,143,90,0.22)',
+    area2: 'rgba(0,143,90,0)',
+    bb: '#008f5a',
+    bbFill: 'rgba(0,143,90,0.05)',
+    cross: 'rgba(115,115,115,0.3)',
+    crossPt: '#008f5a',
+    vol: 'rgba(115,115,115,0.25)',
+    accent: '#008f5a'
+  }
+} as const
+
+function updateChartTheme(engine: ChartEngine) {
+  const palette = colorMode.value === 'dark' ? chartColorPalettes.dark : chartColorPalettes.light
+  Object.assign(engine.options.colors, palette)
+  engine.core.loadCssVariables()
+  engine.dirty = true
+  engine.timeAxisDirty = true
+}
+
+function updateChartThemes() {
+  const engines = [chart, deltaChart, bidAskFlowChart]
+  engines.forEach((engine) => {
+    if (engine) {
+      updateChartTheme(engine)
+    }
+  })
+}
+
+watch(() => colorMode.value, updateChartThemes)
 let seriesHydrated = false
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1015,6 +1074,7 @@ onMounted(() => {
     bidAskFlowChart = createChart(bidAskFlowChartHost.value)
     replaceBidAskFlowSeries()
   }
+  updateChartThemes()
 })
 
 onBeforeUnmount(() => {
