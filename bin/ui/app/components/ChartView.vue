@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, computed, reactive } from 'vue'
+import { onBeforeUnmount, onMounted, ref, computed, reactive, nextTick, watch } from 'vue'
 import { createChart } from '~/packages/open-charts/src'
 import type { AnyChartSeries, ChartEngine } from '~/packages/open-charts/src/core/types'
 import type { Bar } from '~/utils/bar'
@@ -40,7 +40,7 @@ interface HistoryResponse {
 
 const HISTORY_LIMIT = 50
 const DELTA_HISTORY_LIMIT = 15
-const HISTORY_REQUEST_TIMEOUT_MS = 25_000
+const HISTORY_REQUEST_TIMEOUT_MS = 50_000
 const timeframeMinutes: Record<Timeframe, number> = {
   '1m': 1,
   '5m': 5,
@@ -80,6 +80,7 @@ const rollingWindowOptions = [
 const chartHost = ref<HTMLElement | null>(null)
 const deltaChartHost = ref<HTMLElement | null>(null)
 const bidAskFlowChartHost = ref<HTMLElement | null>(null)
+const activeTab = ref<'charts' | 'settings'>('charts')
 const source = ref<MarketSource>('binance')
 const symbol = ref('BTCUSDT')
 const timeframe = ref<Timeframe>('5m')
@@ -113,6 +114,25 @@ const canApply = computed(() => {
     || draftSymbol.value.trim().toUpperCase() !== symbol.value
     || draftTimeframe.value !== timeframe.value
   )
+})
+
+watch(activeTab, async (tab) => {
+  const chartEngines = [chart, deltaChart, bidAskFlowChart]
+
+  if (tab === 'settings') {
+    chartEngines.forEach(chartEngine => chartEngine?.core.pauseLoop())
+    return
+  }
+
+  await nextTick()
+  chartEngines.forEach((chartEngine) => {
+    if (!chartEngine) {
+      return
+    }
+
+    chartEngine.core.resize()
+    chartEngine.core.startLoop()
+  })
 })
 
 const config = useRuntimeConfig()
@@ -1096,329 +1116,416 @@ onBeforeUnmount(() => {
         </h1>
       </div>
 
-      <form
-        class="flex flex-wrap items-end gap-3 rounded-xl border border-default bg-elevated/30 p-3"
-        @submit.prevent="applySettings"
+      <nav
+        class="flex w-fit gap-1 rounded-lg border border-default bg-elevated/30 p-1"
+        role="tablist"
+        aria-label="Vista del chart"
       >
-        <label class="flex min-w-32 flex-col gap-1 text-xs font-medium text-muted">
-          Source
-          <select
-            v-model="draftSource"
-            class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-          >
-            <option
-              v-for="option in sourceOptions"
-              :key="option.value"
-              :value="option.value"
-            >
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-
-        <label class="flex min-w-36 flex-col gap-1 text-xs font-medium text-muted">
-          Symbol
-          <input
-            v-model="draftSymbol"
-            class="min-h-9 rounded-md border border-default bg-default px-3 text-sm uppercase text-highlighted"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="BTCUSDT"
-          >
-        </label>
-
-        <label class="flex min-w-28 flex-col gap-1 text-xs font-medium text-muted">
-          Timeframe
-          <select
-            v-model="draftTimeframe"
-            class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-          >
-            <option
-              v-for="option in timeframeOptions"
-              :key="option.value"
-              :value="option.value"
-            >
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-
         <button
-          type="submit"
-          class="min-h-9 rounded-md bg-primary px-4 text-sm font-semibold text-inverted transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
-          :disabled="!canApply"
+          id="charts-tab"
+          type="button"
+          role="tab"
+          aria-controls="charts-panel"
+          :aria-selected="activeTab === 'charts'"
+          class="rounded-md px-4 py-2 text-sm font-medium transition-colors"
+          :class="activeTab === 'charts' ? 'bg-primary/10 text-primary' : 'text-muted hover:text-highlighted'"
+          @click="activeTab = 'charts'"
         >
-          {{ isLoading ? 'Cargando…' : 'Aplicar' }}
+          Charts
         </button>
-
-        <span class="ml-auto flex items-center gap-2 pb-2 text-xs text-muted">
-          <span
-            class="size-2 rounded-full"
-            :class="{
-              'bg-success': socketStatus === 'connected',
-              'bg-warning': socketStatus === 'connecting',
-              'bg-error': socketStatus === 'error',
-              'bg-muted': socketStatus === 'disconnected'
-            }"
-          />
-          {{ socketStatus === 'connected' ? 'En vivo' : socketStatus === 'connecting' ? 'Conectando' : socketStatus === 'error' ? 'WebSocket error' : 'Desconectado' }}
-        </span>
-      </form>
-
-      <details class="rounded-xl border border-default bg-elevated/20 p-3">
-        <summary class="cursor-pointer text-sm font-semibold text-highlighted">
-          DELTA PROFILE — ROLLING WINDOW
-          <span class="ml-2 text-xs font-normal text-muted">
-            Fuente {{ timeframe }} · {{ profileSettings.rollingWindowMinutes }} min · {{ profileBarCount }} Bars
-          </span>
-        </summary>
-
-        <form
-          class="mt-4 flex flex-col gap-4"
-          @submit.prevent="applyDeltaProfileSettings"
+        <button
+          id="settings-tab"
+          type="button"
+          role="tab"
+          aria-controls="settings-panel"
+          :aria-selected="activeTab === 'settings'"
+          class="rounded-md px-4 py-2 text-sm font-medium transition-colors"
+          :class="activeTab === 'settings' ? 'bg-primary/10 text-primary' : 'text-muted hover:text-highlighted'"
+          @click="activeTab = 'settings'"
         >
-          <div class="flex flex-wrap items-end gap-3">
-            <label class="flex min-w-40 flex-col gap-1 text-xs font-medium text-muted">
-              Rolling Window
-              <select
-                v-model="profileWindowPreset"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-                @change="selectDeltaProfileWindow"
-              >
-                <option
-                  v-for="option in rollingWindowOptions"
-                  :key="option.value"
-                  :value="option.value"
-                >
-                  {{ option.label }}
-                </option>
-              </select>
-            </label>
+          Settings
+        </button>
+      </nav>
 
-            <label
-              v-if="profileWindowPreset === 'custom'"
-              class="flex w-32 flex-col gap-1 text-xs font-medium text-muted"
-            >
-              Minutos (1–240)
-              <input
-                v-model.number="customProfileWindow"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-                type="number"
-                min="1"
-                max="240"
-              >
-            </label>
-
-            <label class="flex w-36 flex-col gap-1 text-xs font-medium text-muted">
-              Value Area (%)
-              <input
-                v-model.number="profileSettings.valueAreaPercentage"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-                type="number"
-                min="1"
-                max="100"
-                step="1"
-              >
-            </label>
-
-            <label class="flex w-36 flex-col gap-1 text-xs font-medium text-muted">
-              Tick Size (opcional)
-              <input
-                v-model="profileSettings.tickSize"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-                inputmode="decimal"
-                placeholder="Precio original"
-              >
-            </label>
-
-            <label class="flex min-w-36 flex-col gap-1 text-xs font-medium text-muted">
-              Escala visual
-              <select
-                v-model="profileSettings.scaleMode"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-              >
-                <option value="linear">Lineal</option>
-                <option value="logarithmic">Logarítmica</option>
-              </select>
-            </label>
-          </div>
-
-          <div class="flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted">
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.showBuyVolume"
-                type="checkbox"
-              >
-              Buy Volume
-            </label>
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.showSellVolume"
-                type="checkbox"
-              >
-              Sell Volume
-            </label>
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.showDelta"
-                type="checkbox"
-              >
-              Delta
-            </label>
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.showDeltaPercentage"
-                type="checkbox"
-              >
-              Delta %
-            </label>
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.showPoc"
-                type="checkbox"
-              >
-              POC
-            </label>
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.showValueArea"
-                type="checkbox"
-              >
-              Value Area
-            </label>
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.showMaxPositiveDelta"
-                type="checkbox"
-              >
-              Max Δ positivo
-            </label>
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.showMaxNegativeDelta"
-                type="checkbox"
-              >
-              Max Δ negativo
-            </label>
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.showLabels"
-                type="checkbox"
-              >
-              Etiquetas
-            </label>
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.includeFormingBar"
-                type="checkbox"
-              >
-              Incluir Bar en formación
-            </label>
-            <label class="flex items-center gap-2">
-              <input
-                v-model="profileSettings.autoUpdate"
-                type="checkbox"
-              >
-              Actualizar automáticamente
-            </label>
-          </div>
-
-          <div class="flex flex-wrap items-center gap-3">
-            <button
-              type="submit"
-              class="min-h-9 rounded-md bg-primary px-4 text-sm font-semibold text-inverted"
-            >
-              Aplicar perfil
-            </button>
-            <button
-              v-if="!profileSettings.autoUpdate"
-              type="button"
-              class="min-h-9 rounded-md border border-default px-4 text-sm font-medium text-highlighted"
-              @click="refreshDeltaProfile(true)"
-            >
-              Actualizar ahora
-            </button>
-            <span class="text-xs text-muted">
-              Usa el footprint de Bars {{ timeframe }} del feed principal; incluye la Bar live mientras está en formación.
-            </span>
-          </div>
-        </form>
-      </details>
-
-      <details
-        class="rounded-xl border border-default bg-elevated/20 p-3"
+      <div
+        v-show="activeTab === 'settings'"
+        id="settings-panel"
+        class="flex flex-col gap-3"
+        role="tabpanel"
+        aria-labelledby="settings-tab"
+        tabindex="0"
       >
-        <summary class="cursor-pointer text-sm font-semibold text-highlighted">
-          ATAQUES ALCISTA/BAJISTA
-          <span class="ml-2 text-xs font-normal text-muted">
-            {{ attackBubbleCount }} señales · flujo agresor + confirmación de precio
-          </span>
-        </summary>
-
+        <p class="text-sm text-muted">
+          Configura el mercado y los indicadores que aparecen en Charts.
+        </p>
         <form
-          class="mt-4 flex flex-col gap-4"
-          @submit.prevent="applyAttackBubbleSettings"
+          class="flex flex-wrap items-end gap-3 rounded-xl border border-default bg-elevated/30 p-3"
+          @submit.prevent="applySettings"
         >
-          <div class="flex flex-wrap items-end gap-3">
-            <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
-              Dominancia mínima (%)
-              <input
-                v-model.number="attackMinDominancePercent"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-                type="number"
-                min="10"
-                max="80"
-                step="5"
-              >
-            </label>
-
-            <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
-              Volumen relativo mínimo (×)
-              <input
-                v-model.number="attackMinRelativeVolume"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-                type="number"
-                min="1"
-                max="3"
-                step="0.1"
-              >
-            </label>
-
-            <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
-              Ventana de referencia (barras)
-              <input
-                v-model.number="attackBaselineBars"
-                class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-                type="number"
-                min="5"
-                max="50"
-                step="1"
-              >
-            </label>
-
-            <label class="flex min-h-9 items-center gap-2 pb-2 text-xs font-medium text-muted">
-              <input
-                v-model="showAttackBubbles"
-                type="checkbox"
-                @change="toggleAttackBubbles"
-              >
-              Mostrar burbujas
-            </label>
-          </div>
-
-          <div class="flex flex-wrap items-center gap-3">
-            <button
-              type="submit"
-              class="min-h-9 rounded-md bg-primary px-4 text-sm font-semibold text-inverted"
+          <label class="flex min-w-32 flex-col gap-1 text-xs font-medium text-muted">
+            Source
+            <select
+              v-model="draftSource"
+              class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
             >
-              Aplicar indicador
-            </button>
-            <span class="text-xs text-muted">
-              El precio debe cerrar en el sentido del flujo; mínimo 5 barras para establecer la referencia.
-            </span>
-          </div>
+              <option
+                v-for="option in sourceOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+
+          <label class="flex min-w-36 flex-col gap-1 text-xs font-medium text-muted">
+            Symbol
+            <input
+              v-model="draftSymbol"
+              class="min-h-9 rounded-md border border-default bg-default px-3 text-sm uppercase text-highlighted"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="BTCUSDT"
+            >
+          </label>
+
+          <label class="flex min-w-28 flex-col gap-1 text-xs font-medium text-muted">
+            Timeframe
+            <select
+              v-model="draftTimeframe"
+              class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+            >
+              <option
+                v-for="option in timeframeOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+
+          <button
+            type="submit"
+            class="min-h-9 rounded-md bg-primary px-4 text-sm font-semibold text-inverted transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="!canApply"
+          >
+            {{ isLoading ? 'Cargando…' : 'Aplicar' }}
+          </button>
+
+          <span class="ml-auto flex items-center gap-2 pb-2 text-xs text-muted">
+            <span
+              class="size-2 rounded-full"
+              :class="{
+                'bg-success': socketStatus === 'connected',
+                'bg-warning': socketStatus === 'connecting',
+                'bg-error': socketStatus === 'error',
+                'bg-muted': socketStatus === 'disconnected'
+              }"
+            />
+            {{ socketStatus === 'connected' ? 'En vivo' : socketStatus === 'connecting' ? 'Conectando' : socketStatus === 'error' ? 'WebSocket error' : 'Desconectado' }}
+          </span>
         </form>
-      </details>
+
+        <details class="rounded-xl border border-default bg-elevated/20 p-3">
+          <summary class="cursor-pointer text-sm font-semibold text-highlighted">
+            DELTA PROFILE — ROLLING WINDOW
+            <span class="ml-2 text-xs font-normal text-muted">
+              Fuente {{ timeframe }} · {{ profileSettings.rollingWindowMinutes }} min · {{ profileBarCount }} Bars
+            </span>
+          </summary>
+
+          <form
+            class="mt-4 flex flex-col gap-4"
+            @submit.prevent="applyDeltaProfileSettings"
+          >
+            <div class="flex flex-wrap items-end gap-3">
+              <label class="flex min-w-40 flex-col gap-1 text-xs font-medium text-muted">
+                Rolling Window
+                <select
+                  v-model="profileWindowPreset"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  @change="selectDeltaProfileWindow"
+                >
+                  <option
+                    v-for="option in rollingWindowOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+              </label>
+
+              <label
+                v-if="profileWindowPreset === 'custom'"
+                class="flex w-32 flex-col gap-1 text-xs font-medium text-muted"
+              >
+                Minutos (1–240)
+                <input
+                  v-model.number="customProfileWindow"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  type="number"
+                  min="1"
+                  max="240"
+                >
+              </label>
+
+              <label class="flex w-36 flex-col gap-1 text-xs font-medium text-muted">
+                Value Area (%)
+                <input
+                  v-model.number="profileSettings.valueAreaPercentage"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  type="number"
+                  min="1"
+                  max="100"
+                  step="1"
+                >
+              </label>
+
+              <label class="flex w-36 flex-col gap-1 text-xs font-medium text-muted">
+                Tick Size (opcional)
+                <input
+                  v-model="profileSettings.tickSize"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  inputmode="decimal"
+                  placeholder="Precio original"
+                >
+              </label>
+
+              <label class="flex min-w-36 flex-col gap-1 text-xs font-medium text-muted">
+                Escala visual
+                <select
+                  v-model="profileSettings.scaleMode"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                >
+                  <option value="linear">Lineal</option>
+                  <option value="logarithmic">Logarítmica</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted">
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.showBuyVolume"
+                  type="checkbox"
+                >
+                Buy Volume
+              </label>
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.showSellVolume"
+                  type="checkbox"
+                >
+                Sell Volume
+              </label>
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.showDelta"
+                  type="checkbox"
+                >
+                Delta
+              </label>
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.showDeltaPercentage"
+                  type="checkbox"
+                >
+                Delta %
+              </label>
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.showPoc"
+                  type="checkbox"
+                >
+                POC
+              </label>
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.showValueArea"
+                  type="checkbox"
+                >
+                Value Area
+              </label>
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.showMaxPositiveDelta"
+                  type="checkbox"
+                >
+                Max Δ positivo
+              </label>
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.showMaxNegativeDelta"
+                  type="checkbox"
+                >
+                Max Δ negativo
+              </label>
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.showLabels"
+                  type="checkbox"
+                >
+                Etiquetas
+              </label>
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.includeFormingBar"
+                  type="checkbox"
+                >
+                Incluir Bar en formación
+              </label>
+              <label class="flex items-center gap-2">
+                <input
+                  v-model="profileSettings.autoUpdate"
+                  type="checkbox"
+                >
+                Actualizar automáticamente
+              </label>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-3">
+              <button
+                type="submit"
+                class="min-h-9 rounded-md bg-primary px-4 text-sm font-semibold text-inverted"
+              >
+                Aplicar perfil
+              </button>
+              <button
+                v-if="!profileSettings.autoUpdate"
+                type="button"
+                class="min-h-9 rounded-md border border-default px-4 text-sm font-medium text-highlighted"
+                @click="refreshDeltaProfile(true)"
+              >
+                Actualizar ahora
+              </button>
+              <span class="text-xs text-muted">
+                Usa el footprint de Bars {{ timeframe }} del feed principal; incluye la Bar live mientras está en formación.
+              </span>
+            </div>
+          </form>
+        </details>
+
+        <details
+          class="rounded-xl border border-default bg-elevated/20 p-3"
+        >
+          <summary class="cursor-pointer text-sm font-semibold text-highlighted">
+            ATAQUES ALCISTA/BAJISTA
+            <span class="ml-2 text-xs font-normal text-muted">
+              {{ attackBubbleCount }} señales · flujo agresor + confirmación de precio
+            </span>
+          </summary>
+
+          <form
+            class="mt-4 flex flex-col gap-4"
+            @submit.prevent="applyAttackBubbleSettings"
+          >
+            <div class="flex flex-wrap items-end gap-3">
+              <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
+                Dominancia mínima (%)
+                <input
+                  v-model.number="attackMinDominancePercent"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  type="number"
+                  min="10"
+                  max="80"
+                  step="5"
+                >
+              </label>
+
+              <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
+                Volumen relativo mínimo (×)
+                <input
+                  v-model.number="attackMinRelativeVolume"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  type="number"
+                  min="1"
+                  max="3"
+                  step="0.1"
+                >
+              </label>
+
+              <label class="flex w-40 flex-col gap-1 text-xs font-medium text-muted">
+                Ventana de referencia (barras)
+                <input
+                  v-model.number="attackBaselineBars"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  type="number"
+                  min="5"
+                  max="50"
+                  step="1"
+                >
+              </label>
+
+              <label class="flex min-h-9 items-center gap-2 pb-2 text-xs font-medium text-muted">
+                <input
+                  v-model="showAttackBubbles"
+                  type="checkbox"
+                  @change="toggleAttackBubbles"
+                >
+                Mostrar burbujas
+              </label>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-3">
+              <button
+                type="submit"
+                class="min-h-9 rounded-md bg-primary px-4 text-sm font-semibold text-inverted"
+              >
+                Aplicar indicador
+              </button>
+              <span class="text-xs text-muted">
+                El precio debe cerrar en el sentido del flujo; mínimo 5 barras para establecer la referencia.
+              </span>
+            </div>
+          </form>
+        </details>
+
+        <section class="flex flex-wrap items-end gap-4 rounded-xl border border-default bg-elevated/20 p-3">
+          <div class="flex min-w-48 flex-col gap-1">
+            <h2 class="text-sm font-semibold text-highlighted">
+              Velas de delta
+            </h2>
+            <p class="text-xs text-muted">
+              {{ deltaCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
+            </p>
+          </div>
+          <label class="flex flex-col gap-1 text-xs font-medium text-muted">
+            Modo
+            <select
+              v-model="deltaMode"
+              class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+              @change="applyDeltaMode"
+            >
+              <option value="PER_BAR">Per bar</option>
+              <option value="CVD">CVD</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="flex flex-wrap items-end gap-4 rounded-xl border border-default bg-elevated/20 p-3">
+          <div class="flex min-w-48 flex-col gap-1">
+            <h2 class="text-sm font-semibold text-highlighted">
+              Flujo bid/ask acumulado
+            </h2>
+            <p class="text-xs text-muted">
+              {{ bidAskFlowCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
+            </p>
+          </div>
+          <label class="flex flex-col gap-1 text-xs font-medium text-muted">
+            Estilo
+            <select
+              v-model="flowCandleStyle"
+              class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+              @change="applyFlowCandleStyle"
+            >
+              <option value="CANDLE">Velas</option>
+              <option value="OHLC_BAR">OHLC</option>
+            </select>
+          </label>
+        </section>
+      </div>
     </header>
 
     <p
@@ -1437,141 +1544,140 @@ onBeforeUnmount(() => {
       {{ profileDiagnostic }}
     </p>
 
-    <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
-      <span>{{ source }} · {{ symbol }} · {{ timeframe }}</span>
-      <div class="flex flex-wrap items-center gap-3">
-        <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
-          Delta Profile {{ timeframe }} · {{ profileSettings.rollingWindowMinutes }}m · {{ profileBarCount }} Bars
-        </span>
-        <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
-          Ataques · {{ attackBubbleCount }}
-        </span>
-        <span
-          v-if="latestBarState !== 'none'"
-          class="rounded-full border px-2 py-1"
-          :class="latestBarState === 'live'
-            ? 'border-warning/40 bg-warning/10 text-warning'
-            : 'border-default bg-elevated/50 text-muted'"
-          role="status"
-        >
-          {{ latestBarState === 'live' ? 'Bar en formación' : 'Última Bar cerrada' }}
-        </span>
-        <span>{{ barCount }} / {{ HISTORY_LIMIT }} barras {{ timeframe }}</span>
-      </div>
-    </div>
-
-    <div class="relative box-border h-[clamp(420px,65vh,720px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
-      <div
-        id="ohlcv-chart"
-        ref="chartHost"
-        class="h-full w-full"
-        aria-label="Gráfico de velas OHLCV"
-      />
-      <div
-        v-if="isLoading && barCount === 0"
-        class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/70 text-sm text-muted"
-        role="status"
-      >
-        Cargando histórico de {{ symbol }}…
-      </div>
-      <div
-        v-else-if="!isLoading && barCount === 0"
-        class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-sm text-muted"
-      >
-        No hay barras históricas para mostrar.
-      </div>
-    </div>
-
-    <section
-      class="flex flex-col gap-3"
-      aria-labelledby="delta-chart-title"
+    <div
+      v-show="activeTab === 'charts'"
+      id="charts-panel"
+      class="flex flex-col gap-4"
+      role="tabpanel"
+      aria-labelledby="charts-tab"
+      tabindex="0"
     >
-      <header class="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h2
-            id="delta-chart-title"
-            class="text-base font-semibold text-highlighted"
+      <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+        <span>{{ source }} · {{ symbol }} · {{ timeframe }}</span>
+        <div class="flex flex-wrap items-center gap-3">
+          <span class="flex items-center gap-2 rounded-full border border-default bg-elevated/50 px-2 py-1">
+            <span
+              class="size-2 rounded-full"
+              :class="{
+                'bg-success': socketStatus === 'connected',
+                'bg-warning': socketStatus === 'connecting',
+                'bg-error': socketStatus === 'error',
+                'bg-muted': socketStatus === 'disconnected'
+              }"
+            />
+            {{ socketStatus === 'connected' ? 'En vivo' : socketStatus === 'connecting' ? 'Conectando' : socketStatus === 'error' ? 'WebSocket error' : 'Desconectado' }}
+          </span>
+          <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
+            Delta Profile {{ timeframe }} · {{ profileSettings.rollingWindowMinutes }}m · {{ profileBarCount }} Bars
+          </span>
+          <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
+            Ataques · {{ attackBubbleCount }}
+          </span>
+          <span
+            v-if="latestBarState !== 'none'"
+            class="rounded-full border px-2 py-1"
+            :class="latestBarState === 'live'
+              ? 'border-warning/40 bg-warning/10 text-warning'
+              : 'border-default bg-elevated/50 text-muted'"
+            role="status"
           >
-            VELAS DE DELTA
-          </h2>
-          <p class="mt-1 text-xs text-muted">
-            Unidad qty · solo cantidades de raw_ticks · {{ deltaCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
-          </p>
+            {{ latestBarState === 'live' ? 'Bar en formación' : 'Última Bar cerrada' }}
+          </span>
+          <span>{{ barCount }} / {{ HISTORY_LIMIT }} barras {{ timeframe }}</span>
         </div>
-        <label class="flex flex-col gap-1 text-xs font-medium text-muted">
-          Modo
-          <select
-            v-model="deltaMode"
-            class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-            @change="applyDeltaMode"
-          >
-            <option value="PER_BAR">Per bar</option>
-            <option value="CVD">CVD</option>
-          </select>
-        </label>
-      </header>
+      </div>
 
-      <div class="relative box-border h-[clamp(260px,35vh,380px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
+      <div class="relative box-border h-[clamp(420px,65vh,720px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
         <div
-          id="delta-chart"
-          ref="deltaChartHost"
+          id="ohlcv-chart"
+          ref="chartHost"
           class="h-full w-full"
-          aria-label="Gráfico de velas de delta"
+          aria-label="Gráfico de velas OHLCV"
         />
         <div
-          v-if="deltaCandleCount === 0"
-          class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
+          v-if="isLoading && barCount === 0"
+          class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/70 text-sm text-muted"
           role="status"
         >
-          Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
+          Cargando histórico de {{ symbol }}…
         </div>
-      </div>
-    </section>
-
-    <section
-      class="flex flex-col gap-3"
-      aria-labelledby="bid-ask-flow-title"
-    >
-      <header class="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h2
-            id="bid-ask-flow-title"
-            class="text-base font-semibold text-highlighted"
-          >
-            FLUJO BID/ASK ACUMULADO
-          </h2>
-          <p class="mt-1 text-xs text-muted">
-            Unidad qty · OHLC acumulado desde la primera barra cargada (base 0) · solo raw_ticks · {{ bidAskFlowCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
-          </p>
-        </div>
-        <label class="flex flex-col gap-1 text-xs font-medium text-muted">
-          Estilo
-          <select
-            v-model="flowCandleStyle"
-            class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
-            @change="applyFlowCandleStyle"
-          >
-            <option value="CANDLE">Velas</option>
-            <option value="OHLC_BAR">OHLC</option>
-          </select>
-        </label>
-      </header>
-
-      <div class="relative box-border h-[clamp(260px,35vh,380px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
         <div
-          id="bid-ask-flow-chart"
-          ref="bidAskFlowChartHost"
-          class="h-full w-full"
-          aria-label="Gráfico OHLC de flujo bid/ask acumulado en cantidades"
-        />
-        <div
-          v-if="bidAskFlowCandleCount === 0"
-          class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
-          role="status"
+          v-else-if="!isLoading && barCount === 0"
+          class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-sm text-muted"
         >
-          Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
+          No hay barras históricas para mostrar.
         </div>
       </div>
-    </section>
+
+      <section
+        class="flex flex-col gap-3"
+        aria-labelledby="delta-chart-title"
+      >
+        <header>
+          <div>
+            <h2
+              id="delta-chart-title"
+              class="text-base font-semibold text-highlighted"
+            >
+              VELAS DE DELTA
+            </h2>
+            <p class="mt-1 text-xs text-muted">
+              Unidad qty · solo cantidades de raw_ticks · {{ deltaCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
+            </p>
+          </div>
+        </header>
+
+        <div class="relative box-border h-[clamp(260px,35vh,380px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
+          <div
+            id="delta-chart"
+            ref="deltaChartHost"
+            class="h-full w-full"
+            aria-label="Gráfico de velas de delta"
+          />
+          <div
+            v-if="deltaCandleCount === 0"
+            class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
+            role="status"
+          >
+            Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="flex flex-col gap-3"
+        aria-labelledby="bid-ask-flow-title"
+      >
+        <header>
+          <div>
+            <h2
+              id="bid-ask-flow-title"
+              class="text-base font-semibold text-highlighted"
+            >
+              FLUJO BID/ASK ACUMULADO
+            </h2>
+            <p class="mt-1 text-xs text-muted">
+              Unidad qty · OHLC acumulado desde la primera barra cargada (base 0) · solo raw_ticks · {{ bidAskFlowCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
+            </p>
+          </div>
+        </header>
+
+        <div class="relative box-border h-[clamp(260px,35vh,380px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
+          <div
+            id="bid-ask-flow-chart"
+            ref="bidAskFlowChartHost"
+            class="h-full w-full"
+            aria-label="Gráfico OHLC de flujo bid/ask acumulado en cantidades"
+          />
+          <div
+            v-if="bidAskFlowCandleCount === 0"
+            class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
+            role="status"
+          >
+            Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
+          </div>
+        </div>
+      </section>
+    </div>
   </section>
 </template>

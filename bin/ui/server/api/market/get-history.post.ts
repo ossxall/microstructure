@@ -12,7 +12,7 @@ export default defineEventHandler(async (event) => {
 
   return $fetch(`${config.marketServerUrl}/get-history`, {
     method: 'POST',
-    timeout: 20_000,
+    timeout: 45_000,
     body: {
       ...request,
       timeframe: request.timeframe ?? '1m',
