@@ -26,6 +26,14 @@ import {
   createBidAskFlowSeries,
   type FlowCandleStyle
 } from '~/utils/bidAskFlowSeries'
+import {
+  calculateMomentumSeries,
+  createMomentumSeries,
+  DEFAULT_MOMENTUM_OPTIONS,
+  normalizeMomentumOptions,
+  type MomentumOptions
+} from '~/utils/momentumSeries'
+import { parseLosslessJson } from '~/utils/losslessJson'
 
 type MarketSource = 'binance' | 'dydx'
 type Timeframe = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d'
@@ -78,6 +86,7 @@ const rollingWindowOptions = [
 ]
 
 const chartHost = ref<HTMLElement | null>(null)
+const momentumChartHost = ref<HTMLElement | null>(null)
 const deltaChartHost = ref<HTMLElement | null>(null)
 const bidAskFlowChartHost = ref<HTMLElement | null>(null)
 const activeTab = ref<'charts' | 'settings'>('charts')
@@ -103,6 +112,10 @@ const deltaMode = ref<DeltaMode>('PER_BAR')
 const deltaCandleCount = ref(0)
 const flowCandleStyle = ref<FlowCandleStyle>('CANDLE')
 const bidAskFlowCandleCount = ref(0)
+const momentumPointCount = ref(0)
+const momentumDoubtfulCount = ref(0)
+const momentumDiagnostic = ref('')
+const momentumSettings = reactive<MomentumOptions>({ ...DEFAULT_MOMENTUM_OPTIONS })
 const showAttackBubbles = ref(true)
 const attackBubbleCount = ref(0)
 const attackMinDominancePercent = ref(25)
@@ -117,7 +130,7 @@ const canApply = computed(() => {
 })
 
 watch(activeTab, async (tab) => {
-  const chartEngines = [chart, deltaChart, bidAskFlowChart]
+  const chartEngines = [chart, momentumChart, deltaChart, bidAskFlowChart]
 
   if (tab === 'settings') {
     chartEngines.forEach(chartEngine => chartEngine?.core.pauseLoop())
@@ -145,9 +158,11 @@ const deltaProfile = new RollingDeltaProfile(profileSettings, (message) => {
   console.warn(message)
 })
 let chart: ChartEngine | undefined
+let momentumChart: ChartEngine | undefined
 let deltaChart: ChartEngine | undefined
 let bidAskFlowChart: ChartEngine | undefined
 let series: AnyChartSeries | undefined
+let momentumSeries: AnyChartSeries | undefined
 let attackBubbleSeries: AnyChartSeries | undefined
 let unsubscribeChartEvents: (() => void) | undefined
 let deltaCandleSeries: AnyChartSeries | undefined
@@ -205,7 +220,7 @@ function updateChartTheme(engine: ChartEngine) {
 }
 
 function updateChartThemes() {
-  const engines = [chart, deltaChart, bidAskFlowChart]
+  const engines = [chart, momentumChart, deltaChart, bidAskFlowChart]
   engines.forEach((engine) => {
     if (engine) {
       updateChartTheme(engine)
@@ -263,6 +278,17 @@ function numberValue(value: unknown): number {
   return Number.NaN
 }
 
+function timestampToSeconds(value: unknown): number {
+  const timestamp = numberValue(value)
+  const unitsPerSecond: Record<MomentumOptions['timestampUnit'], number> = {
+    s: 1,
+    ms: 1_000,
+    us: 1_000_000,
+    ns: 1_000_000_000
+  }
+  return timestamp / unitsPerSecond[momentumSettings.timestampUnit]
+}
+
 function parseMarketBar(value: unknown): Bar | null {
   if (!isRecord(value)) {
     return null
@@ -299,13 +325,16 @@ function parseMarketBar(value: unknown): Bar | null {
     ...(typeof value.event_id === 'string' ? { event_id: value.event_id } : {}),
     ...(typeof value.event_type === 'string' ? { event_type: value.event_type } : {}),
     // open-charts uses Unix timestamps in seconds for its time axis.
-    time: timestamp / 1000,
+    time: timestampToSeconds(bar.timestamp ?? bar.time),
     open,
     high,
     low,
     close,
     volume,
-    revision: Number.isFinite(revision) ? revision : 0
+    revision: Number.isFinite(revision) ? revision : 0,
+    ...(bar.revision !== undefined || value.revision !== undefined
+      ? { revision_raw: (bar.revision ?? value.revision) as string | number }
+      : {})
   } as Bar
 }
 
@@ -327,22 +356,36 @@ function parseDeltaBar(value: unknown): DeltaBar | null {
     : undefined
 
   return {
-    time: timestamp / 1000,
+    time: timestampToSeconds(bar.timestamp ?? bar.time),
     revision: Number.isFinite(revision) ? revision : 0,
     ...(header ? { header } : {}),
     ...(rawTicks ? { raw_ticks: rawTicks } : {})
   }
 }
 
+function exactBarRevision(bar: Bar): bigint {
+  const revision = bar.revision_raw ?? bar.revision
+  if (typeof revision === 'string' && /^\d+$/.test(revision.trim())) {
+    return BigInt(revision.trim())
+  }
+  if (typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0) {
+    return BigInt(revision)
+  }
+  return BigInt(Math.max(0, Math.trunc(bar.revision)))
+}
+
 function upsertBar(bar: Bar): boolean {
   const current = bars.get(bar.time)
+  const revisionComparison = current
+    ? exactBarRevision(bar) - exactBarRevision(current)
+    : 1n
 
   if (
     current
     && (
-      bar.revision < current.revision
+      revisionComparison < 0n
       || (
-        bar.revision === current.revision
+        revisionComparison === 0n
         && JSON.stringify(bar) === JSON.stringify(current)
       )
     )
@@ -442,6 +485,29 @@ function replaceSeries() {
   attackBubbleSeries = chart.api.addSeries(createAttackBubbleSeries())
   attackBubbleSeries.setVisible(showAttackBubbles.value)
   applyAttackBubbleSettings()
+}
+
+function momentumParamsPatch(options = momentumSettings) {
+  return {
+    signalPeriod: options.signalPeriod,
+    basePeriod: options.basePeriod,
+    alpha: options.alpha,
+    maxIntensity: options.maxIntensity,
+    warmup: options.warmup,
+    timestampUnit: options.timestampUnit
+  }
+}
+
+function replaceMomentumSeries() {
+  if (!momentumChart) {
+    return
+  }
+
+  momentumSeries?.destroy({ silent: true })
+  momentumSeries = momentumChart.api.addSeries(createMomentumSeries())
+  momentumSeries.setParams(momentumParamsPatch())
+  momentumPointCount.value = 0
+  momentumDoubtfulCount.value = 0
 }
 
 function replaceDeltaCandleSeries() {
@@ -559,10 +625,34 @@ function renderCurrentBars() {
     series.setData(currentBars)
     attackBubbleSeries?.setData(currentBars)
     deltaProfileSeries?.setData(currentBars)
+    momentumSeries?.setData(currentBars)
   }
 
   seriesHydrated = true
   refreshDeltaProfile(true)
+  refreshMomentumStatus(currentBars)
+}
+
+function refreshMomentumStatus(currentBars = [...bars.values()].sort((left, right) => left.time - right.time)) {
+  try {
+    const points = calculateMomentumSeries(currentBars, momentumSettings)
+    momentumPointCount.value = points.filter(point => point.bullish !== null).length
+    momentumDoubtfulCount.value = points.filter(point => point.doubtful).length
+
+    if (currentBars.length === 0) {
+      momentumDiagnostic.value = 'Entrada vacía: no hay barras para calcular el indicador.'
+    } else if (currentBars.length <= momentumSettings.warmup) {
+      momentumDiagnostic.value = `Aviso: la serie tiene ${currentBars.length} barras; se necesitan más de ${momentumSettings.warmup} para mostrar momentum.`
+    } else {
+      momentumDiagnostic.value = ''
+    }
+  } catch (error) {
+    momentumPointCount.value = 0
+    momentumDoubtfulCount.value = 0
+    momentumDiagnostic.value = error instanceof Error
+      ? error.message
+      : 'No se pudo calcular el indicador de momentum.'
+  }
 }
 
 async function fetchMarketHistory(
@@ -728,7 +818,9 @@ async function resyncMarketHistory(
       series.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
       attackBubbleSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
       deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+      momentumSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
     }
+    refreshMomentumStatus([...bars.values()].sort((left, right) => left.time - right.time))
 
     if (errorMessage.value.startsWith('Resincronización:')) {
       errorMessage.value = ''
@@ -821,7 +913,7 @@ function connectWebSocket(
       }
 
       try {
-        const message: unknown = JSON.parse(event.data)
+        const message: unknown = parseLosslessJson(event.data)
 
         if (
           isRecord(message)
@@ -879,6 +971,8 @@ function connectWebSocket(
             series?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
             attackBubbleSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
             deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+            momentumSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+            refreshMomentumStatus()
           }
         }
       } catch {
@@ -928,12 +1022,16 @@ async function loadMarketData(
   bidAskFlowCandleCount.value = 0
   barCount.value = 0
   attackBubbleCount.value = 0
+  momentumPointCount.value = 0
+  momentumDoubtfulCount.value = 0
+  momentumDiagnostic.value = ''
   latestBarState.value = 'none'
   profileDiagnostic.value = ''
   profileBarCount.value = 0
   deltaProfile.reset(nextSymbol, nextSource, nextTimeframe)
   stopWebSocket()
   replaceSeries()
+  replaceMomentumSeries()
   replaceDeltaCandleSeries()
   replaceBidAskFlowSeries()
   connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
@@ -1041,6 +1139,21 @@ function applyDeltaProfileSettings() {
   }
 }
 
+async function applyMomentumSettings() {
+  const previousTimestampUnit = momentumSettings.timestampUnit
+  const options = normalizeMomentumOptions(momentumSettings)
+  Object.assign(momentumSettings, options)
+  momentumSeries?.setParams(momentumParamsPatch(options))
+  if (
+    previousTimestampUnit !== options.timestampUnit
+    && hasSelectedInitialTimeframe.value
+  ) {
+    await loadMarketData(source.value, symbol.value, timeframe.value)
+    return
+  }
+  refreshMomentumStatus()
+}
+
 function selectDeltaProfileWindow() {
   if (profileWindowPreset.value !== 'custom') {
     profileSettings.rollingWindowMinutes = Number(profileWindowPreset.value)
@@ -1051,12 +1164,16 @@ function selectDeltaProfileWindow() {
   applyDeltaProfileSettings()
 }
 
-onMounted(() => {
+onMounted(async () => {
   if (!chartHost.value) {
     return
   }
 
   chart = createChart(chartHost.value)
+  if (momentumChartHost.value) {
+    momentumChart = createChart(momentumChartHost.value)
+    replaceMomentumSeries()
+  }
   unsubscribeChartEvents = chart.subscribe((event) => {
     if (
       event.type === 'series:params'
@@ -1075,6 +1192,12 @@ onMounted(() => {
     replaceBidAskFlowSeries()
   }
   updateChartThemes()
+
+  await nextTick()
+  const chartEngines = [chart, momentumChart, deltaChart, bidAskFlowChart]
+  chartEngines.forEach((engine) => {
+    engine?.core.resize()
+  })
 })
 
 onBeforeUnmount(() => {
@@ -1083,12 +1206,15 @@ onBeforeUnmount(() => {
   unsubscribeChartEvents = undefined
   stopWebSocket()
   chart?.api.destroy()
+  momentumChart?.api.destroy()
   deltaChart?.api.destroy()
   bidAskFlowChart?.api.destroy()
   chart = undefined
+  momentumChart = undefined
   deltaChart = undefined
   bidAskFlowChart = undefined
   series = undefined
+  momentumSeries = undefined
   attackBubbleSeries = undefined
   deltaCandleSeries = undefined
   bidAskFlowSeries = undefined
@@ -1542,6 +1668,107 @@ onBeforeUnmount(() => {
           </form>
         </details>
 
+        <details class="rounded-xl border border-default bg-elevated/20 p-3">
+          <summary class="cursor-pointer text-sm font-semibold text-highlighted">
+            MOMENTUM ALCISTA/BAJISTA
+            <span class="ml-2 text-xs font-normal text-muted">
+              {{ momentumPointCount }} puntos · {{ momentumDoubtfulCount }} barras dudosas
+            </span>
+          </summary>
+
+          <form
+            class="mt-4 flex flex-col gap-4"
+            @submit.prevent="applyMomentumSettings"
+          >
+            <div class="flex flex-wrap items-end gap-3">
+              <label class="flex w-36 flex-col gap-1 text-xs font-medium text-muted">
+                Suavizado de señal
+                <input
+                  v-model.number="momentumSettings.signalPeriod"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  type="number"
+                  min="1"
+                  max="500"
+                  step="1"
+                >
+              </label>
+
+              <label class="flex w-36 flex-col gap-1 text-xs font-medium text-muted">
+                Referencia de intensidad
+                <input
+                  v-model.number="momentumSettings.basePeriod"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  type="number"
+                  min="1"
+                  max="2000"
+                  step="1"
+                >
+              </label>
+
+              <label class="flex w-32 flex-col gap-1 text-xs font-medium text-muted">
+                Peso del flujo (α)
+                <input
+                  v-model.number="momentumSettings.alpha"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                >
+              </label>
+
+              <label class="flex w-32 flex-col gap-1 text-xs font-medium text-muted">
+                Tope de intensidad
+                <input
+                  v-model.number="momentumSettings.maxIntensity"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                >
+              </label>
+
+              <label class="flex w-32 flex-col gap-1 text-xs font-medium text-muted">
+                Calentamiento
+                <input
+                  v-model.number="momentumSettings.warmup"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                  type="number"
+                  min="0"
+                  max="2000"
+                  step="1"
+                >
+              </label>
+
+              <label class="flex w-32 flex-col gap-1 text-xs font-medium text-muted">
+                Unidad timestamp
+                <select
+                  v-model="momentumSettings.timestampUnit"
+                  class="min-h-9 rounded-md border border-default bg-default px-3 text-sm text-highlighted"
+                >
+                  <option value="s">s</option>
+                  <option value="ms">ms</option>
+                  <option value="us">us</option>
+                  <option value="ns">ns</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-3">
+              <button
+                type="submit"
+                class="min-h-9 rounded-md bg-primary px-4 text-sm font-semibold text-inverted"
+              >
+                Aplicar indicador
+              </button>
+              <span class="text-xs text-muted">
+                Buy notional representa compras agresoras; las magnitudes de precio son movimientos tick a tick. Alcista &gt; bajista favorece al alza; ambas altas pueden indicar conflicto o alternancia. No es predictivo.
+              </span>
+            </div>
+          </form>
+        </details>
+
         <section class="flex flex-wrap items-end gap-4 rounded-xl border border-default bg-elevated/20 p-3">
           <div class="flex min-w-48 flex-col gap-1">
             <h2 class="text-sm font-semibold text-highlighted">
@@ -1604,6 +1831,14 @@ onBeforeUnmount(() => {
       {{ profileDiagnostic }}
     </p>
 
+    <p
+      v-if="momentumDiagnostic"
+      class="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning"
+      role="status"
+    >
+      {{ momentumDiagnostic }}
+    </p>
+
     <div
       v-show="activeTab === 'charts'"
       id="charts-panel"
@@ -1632,6 +1867,9 @@ onBeforeUnmount(() => {
           </span>
           <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
             Ataques · {{ attackBubbleCount }}
+          </span>
+          <span class="rounded-full border border-default bg-elevated/50 px-2 py-1">
+            Momentum · {{ momentumPointCount }} puntos
           </span>
           <span
             v-if="latestBarState !== 'none'"
@@ -1668,6 +1906,41 @@ onBeforeUnmount(() => {
           No hay barras históricas para mostrar.
         </div>
       </div>
+
+      <section
+        class="flex flex-col gap-3"
+        aria-labelledby="momentum-chart-title"
+      >
+        <header>
+          <div>
+            <h2
+              id="momentum-chart-title"
+              class="text-base font-semibold text-highlighted"
+            >
+              MOMENTUM ALCISTA/BAJISTA
+            </h2>
+            <p class="mt-1 text-xs text-muted">
+              Flujo y eficiencia del precio ponderados por intensidad · línea alcista continua · bajista discontinua · marcas naranjas = integridad dudosa
+            </p>
+          </div>
+        </header>
+
+        <div class="relative box-border h-[clamp(220px,30vh,320px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
+          <div
+            id="momentum-chart"
+            ref="momentumChartHost"
+            class="h-full w-full"
+            aria-label="Indicador de momentum alcista y bajista"
+          />
+          <div
+            v-if="momentumPointCount === 0"
+            class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
+            role="status"
+          >
+            El indicador necesita datos microestructurales válidos y {{ momentumSettings.warmup + 1 }} barras para mostrar las líneas.
+          </div>
+        </div>
+      </section>
 
       <section
         class="flex flex-col gap-3"

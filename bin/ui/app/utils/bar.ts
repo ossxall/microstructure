@@ -90,6 +90,8 @@ export interface Bar {
   close: number
   volume: number
   revision: number
+  /** Exact wire revision retained for indicators that compare u64 revisions. */
+  revision_raw?: BarValue
   /** Event envelope lifecycle marker; missing history values are finalized. */
   is_final?: boolean
   event_id?: string

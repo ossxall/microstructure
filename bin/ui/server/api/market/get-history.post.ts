@@ -1,3 +1,5 @@
+import { parseLosslessJson } from '../../../app/utils/losslessJson'
+
 interface HistoryRequest {
   source: string
   symbol: string
@@ -17,6 +19,7 @@ export default defineEventHandler(async (event) => {
       ...request,
       timeframe: request.timeframe ?? '1m',
       include_raw_ticks: request.include_raw_ticks ?? true
-    }
+    },
+    parseResponse: parseLosslessJson
   })
 })

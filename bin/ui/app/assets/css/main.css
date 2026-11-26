@@ -18,6 +18,7 @@
 }
 
 #ohlcv-chart,
+#momentum-chart,
 #delta-chart,
 #bid-ask-flow-chart {
   position: relative;
@@ -34,6 +35,10 @@
   min-height: 420px;
 }
 
+#momentum-chart {
+  min-height: 220px;
+}
+
 #delta-chart {
   min-height: 240px;
 }
@@ -43,6 +48,7 @@
 }
 
 #ohlcv-chart .pane,
+#momentum-chart .pane,
 #delta-chart .pane,
 #bid-ask-flow-chart .pane {
   position: relative;
@@ -52,21 +58,26 @@
 }
 
 #ohlcv-chart #pane-main,
+#momentum-chart #pane-main,
 #delta-chart #pane-main,
 #bid-ask-flow-chart #pane-main {
   flex: 1 1 0;
 }
 
 #ohlcv-chart canvas.chart-canvas,
+#momentum-chart canvas.chart-canvas,
 #delta-chart canvas.chart-canvas,
 #bid-ask-flow-chart canvas.chart-canvas,
 #ohlcv-chart canvas.drawings-canvas,
+#momentum-chart canvas.drawings-canvas,
 #delta-chart canvas.drawings-canvas,
 #bid-ask-flow-chart canvas.drawings-canvas,
 #ohlcv-chart canvas.pricescale-canvas,
+#momentum-chart canvas.pricescale-canvas,
 #delta-chart canvas.pricescale-canvas,
 #bid-ask-flow-chart canvas.pricescale-canvas,
 #ohlcv-chart canvas.overlay-canvas,
+#momentum-chart canvas.overlay-canvas,
 #delta-chart canvas.overlay-canvas,
 #bid-ask-flow-chart canvas.overlay-canvas {
   position: absolute;
@@ -76,15 +87,18 @@
 }
 
 #ohlcv-chart canvas.drawings-canvas,
+#momentum-chart canvas.drawings-canvas,
 #delta-chart canvas.drawings-canvas,
 #bid-ask-flow-chart canvas.drawings-canvas,
 #ohlcv-chart canvas.overlay-canvas,
+#momentum-chart canvas.overlay-canvas,
 #delta-chart canvas.overlay-canvas,
 #bid-ask-flow-chart canvas.overlay-canvas {
   pointer-events: none;
 }
 
 #ohlcv-chart canvas.pricescale-canvas,
+#momentum-chart canvas.pricescale-canvas,
 #delta-chart canvas.pricescale-canvas,
 #bid-ask-flow-chart canvas.pricescale-canvas {
   right: 0;
@@ -92,6 +106,7 @@
 }
 
 #ohlcv-chart #time-axis,
+#momentum-chart #time-axis,
 #delta-chart #time-axis,
 #bid-ask-flow-chart #time-axis {
   position: relative;
@@ -102,6 +117,7 @@
 }
 
 #ohlcv-chart #time-axis canvas,
+#momentum-chart #time-axis canvas,
 #delta-chart #time-axis canvas,
 #bid-ask-flow-chart #time-axis canvas {
   position: absolute;
@@ -110,6 +126,7 @@
 }
 
 #ohlcv-chart #scrollbar,
+#momentum-chart #scrollbar,
 #delta-chart #scrollbar,
 #bid-ask-flow-chart #scrollbar {
   position: relative;
@@ -118,6 +135,7 @@
 }
 
 #ohlcv-chart #scrollthumb,
+#momentum-chart #scrollthumb,
 #delta-chart #scrollthumb,
 #bid-ask-flow-chart #scrollthumb {
   position: absolute;
@@ -125,6 +143,7 @@
 }
 
 #ohlcv-chart #chart-legend,
+#momentum-chart #chart-legend,
 #delta-chart #chart-legend,
 #bid-ask-flow-chart #chart-legend {
   position: absolute;
@@ -137,6 +156,7 @@
 }
 
 #ohlcv-chart #chart-indicators,
+#momentum-chart #chart-indicators,
 #delta-chart #chart-indicators,
 #bid-ask-flow-chart #chart-indicators {
   position: absolute;
@@ -150,6 +170,7 @@
 }
 
 #ohlcv-chart .chart-indicators-item,
+#momentum-chart .chart-indicators-item,
 #delta-chart .chart-indicators-item,
 #bid-ask-flow-chart .chart-indicators-item {
   display: flex;
@@ -158,12 +179,15 @@
 }
 
 #ohlcv-chart .chart-indicators-item-settings,
+#momentum-chart .chart-indicators-item-settings,
 #delta-chart .chart-indicators-item-settings,
 #bid-ask-flow-chart .chart-indicators-item-settings,
 #ohlcv-chart .chart-indicators-item-delete,
+#momentum-chart .chart-indicators-item-delete,
 #delta-chart .chart-indicators-item-delete,
 #bid-ask-flow-chart .chart-indicators-item-delete,
 #ohlcv-chart .chart-overlay-ui,
+#momentum-chart .chart-overlay-ui,
 #delta-chart .chart-overlay-ui,
 #bid-ask-flow-chart .chart-overlay-ui {
   display: none;

@@ -3,6 +3,11 @@ import type { AppView } from '~/stores/navigation'
 
 const navigationStore = useNavigationStore()
 const colorMode = useColorMode()
+const colorModeReady = ref(false)
+
+onMounted(() => {
+  colorModeReady.value = true
+})
 
 const items: { view: AppView, label: string, icon: string }[] = [{
   view: 'chart',
@@ -42,17 +47,27 @@ function toggleColorMode() {
 
     <button
       type="button"
-      :aria-label="colorMode.value === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
-      :title="colorMode.value === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
+      :aria-label="!colorModeReady
+        ? 'Toggle color mode'
+        : colorMode.value === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
+      :title="!colorModeReady
+        ? 'Toggle color mode'
+        : colorMode.value === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
       class="mt-auto flex w-full flex-col items-center gap-2 rounded-lg px-2 py-3 text-muted transition-colors hover:bg-elevated hover:text-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
       @click="toggleColorMode"
     >
       <UIcon
-        :name="colorMode.value === 'dark' ? 'i-lucide-sun' : 'i-lucide-moon'"
+        :name="!colorModeReady
+          ? 'i-lucide-sun'
+          : colorMode.value === 'dark' ? 'i-lucide-sun' : 'i-lucide-moon'"
         class="size-5"
         aria-hidden="true"
       />
-      <span class="text-xs font-medium">{{ colorMode.value === 'dark' ? 'Light' : 'Dark' }}</span>
+      <span class="text-xs font-medium">{{
+        !colorModeReady
+          ? 'Theme'
+          : colorMode.value === 'dark' ? 'Light' : 'Dark'
+      }}</span>
     </button>
   </aside>
 </template>
