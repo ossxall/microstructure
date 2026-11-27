@@ -1,13 +1,13 @@
 use eframe::egui::{self, Color32, RichText, Stroke};
 use egui_plot::{Bar, BarChart, Line, Plot, PlotPoints, Polygon};
 
-const BACKGROUND: Color32 = Color32::from_rgb(8, 12, 10);
-const PANEL: Color32 = Color32::from_rgb(14, 21, 17);
-const GREEN: Color32 = Color32::from_rgb(48, 190, 120);
-const RED: Color32 = Color32::from_rgb(210, 82, 82);
-const GRID: Color32 = Color32::from_rgb(38, 68, 51);
-const TEXT: Color32 = Color32::from_rgb(205, 222, 211);
-const MUTED: Color32 = Color32::from_rgb(119, 145, 128);
+const BACKGROUND: Color32 = Color32::BLACK;
+const PANEL: Color32 = Color32::BLACK;
+const LIME: Color32 = Color32::from_rgb(0, 255, 0);
+const LIME_GREEN: Color32 = Color32::from_rgb(50, 205, 50);
+const GRID: Color32 = Color32::from_rgb(119, 136, 153);
+const TEXT: Color32 = Color32::WHITE;
+const MUTED: Color32 = GRID;
 
 #[derive(Clone, Copy)]
 struct Candle {
@@ -64,7 +64,11 @@ impl ChartApp {
             .show(ui, |plot_ui| {
                 for (index, candle) in self.candles.iter().copied().enumerate() {
                     let x = index as f64;
-                    let color = if candle.is_bullish() { GREEN } else { RED };
+                    let body_color = if candle.is_bullish() {
+                        Color32::BLACK
+                    } else {
+                        Color32::WHITE
+                    };
                     let body_low = candle.open.min(candle.close);
                     let body_high = candle.open.max(candle.close);
                     let body_height = (body_high - body_low).max(0.000015);
@@ -77,7 +81,7 @@ impl ChartApp {
                             format!("wick-{index}"),
                             PlotPoints::from(vec![[x, candle.low], [x, candle.high]]),
                         )
-                        .color(color)
+                        .color(LIME)
                         .width(1.2)
                         .allow_hover(false),
                     );
@@ -92,8 +96,8 @@ impl ChartApp {
                                 [x - half_width, body_high],
                             ],
                         )
-                        .fill_color(color)
-                        .stroke(Stroke::new(1.0, color))
+                        .fill_color(body_color)
+                        .stroke(Stroke::new(1.0, LIME))
                         .allow_hover(false),
                     );
                 }
@@ -113,11 +117,10 @@ impl ChartApp {
             .copied()
             .enumerate()
             .map(|(index, candle)| {
-                let color = if candle.is_bullish() { GREEN } else { RED };
                 Bar::new(index as f64, candle.volume)
                     .width(0.64)
-                    .fill(color.linear_multiply(0.62))
-                    .stroke(Stroke::new(1.0, color))
+                    .fill(LIME_GREEN)
+                    .stroke(Stroke::new(1.0, LIME_GREEN))
             })
             .collect();
 
@@ -151,18 +154,18 @@ impl eframe::App for ChartApp {
                     close: 0.0,
                     volume: 0.0,
                 });
-                let change_color = if last.is_bullish() { GREEN } else { RED };
+                let change_color = if last.is_bullish() { LIME } else { TEXT };
 
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("EURUSD").strong().color(TEXT));
                     ui.label(
                         RichText::new("M5")
                             .strong()
-                            .color(GREEN)
+                            .color(LIME)
                             .background_color(Color32::from_rgb(22, 48, 34)),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("● MERCADO ABIERTO").color(GREEN).small());
+                        ui.label(RichText::new("● MERCADO ABIERTO").color(LIME).small());
                         ui.label(RichText::new("FX · Demo").color(MUTED).small());
                     });
                 });
@@ -221,9 +224,9 @@ impl eframe::App for ChartApp {
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("●").color(GREEN));
+                    ui.label(RichText::new("●").color(LIME));
                     ui.label(RichText::new("Alcista").color(MUTED).small());
-                    ui.label(RichText::new("●").color(RED));
+                    ui.label(RichText::new("●").color(TEXT));
                     ui.label(RichText::new("Bajista").color(MUTED).small());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
@@ -245,11 +248,11 @@ fn set_green_dark_theme(ctx: &egui::Context) {
     visuals.weak_text_color = Some(MUTED);
     visuals.panel_fill = BACKGROUND;
     visuals.window_fill = BACKGROUND;
-    visuals.extreme_bg_color = Color32::from_rgb(5, 8, 6);
+    visuals.extreme_bg_color = BACKGROUND;
     visuals.faint_bg_color = PANEL;
-    visuals.hyperlink_color = GREEN;
+    visuals.hyperlink_color = LIME;
     visuals.selection.bg_fill = Color32::from_rgb(30, 92, 57);
-    visuals.selection.stroke = Stroke::new(1.0, GREEN);
+    visuals.selection.stroke = Stroke::new(1.0, LIME);
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(28, 56, 39);
     visuals.widgets.active.bg_fill = Color32::from_rgb(35, 82, 52);
     ctx.set_visuals(visuals);
