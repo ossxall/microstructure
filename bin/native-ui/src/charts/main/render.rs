@@ -1,5 +1,5 @@
 use eframe::egui::{self, Color32, Stroke};
-use egui_plot::{Axis, HPlacement, Line, Plot, PlotMemory, PlotPoints, Polygon};
+use egui_plot::{Axis, HPlacement, Line, Plot, PlotMemory, PlotPoint, PlotPoints, Polygon, Text};
 
 use crate::{
     app_log::AppLogger,
@@ -300,7 +300,31 @@ fn draw_delta_profile(
             .stroke(Stroke::NONE)
             .allow_hover(false),
         );
+        plot_ui.text(
+            Text::new(
+                format!("delta-profile-value-{chart_id}-{index}"),
+                PlotPoint::new(right - width / 2.0, level.price),
+                format_delta(level.buy_volume - level.sell_volume),
+            )
+            .color(Color32::WHITE)
+            .allow_hover(false),
+        );
     }
+}
+
+fn format_delta(delta: f64) -> String {
+    if !delta.is_finite() || delta == 0.0 {
+        return "0".to_owned();
+    }
+
+    let mut formatted = format!("{delta:+.3}");
+    while formatted.ends_with('0') {
+        formatted.pop();
+    }
+    if formatted.ends_with('.') {
+        formatted.pop();
+    }
+    formatted
 }
 
 fn inverted_axis_zoom_factor(delta: f32) -> f32 {
@@ -377,11 +401,18 @@ fn reverse_axis_zoom_drag(
 
 #[cfg(test)]
 mod tests {
-    use super::inverted_axis_zoom_factor;
+    use super::{format_delta, inverted_axis_zoom_factor};
 
     #[test]
     fn axis_drag_zoom_direction_is_inverted() {
         assert!(inverted_axis_zoom_factor(10.0) < 1.0);
         assert!(inverted_axis_zoom_factor(-10.0) > 1.0);
+    }
+
+    #[test]
+    fn delta_labels_keep_the_sign_and_trim_unneeded_decimals() {
+        assert_eq!(format_delta(12.5), "+12.5");
+        assert_eq!(format_delta(-3.125), "-3.125");
+        assert_eq!(format_delta(0.0), "0");
     }
 }
