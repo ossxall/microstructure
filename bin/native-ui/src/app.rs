@@ -389,7 +389,7 @@ impl ChartApp {
 
     fn show_tab_content(ui: &mut egui::Ui, tab: &ChartTab, action: &mut Option<TabAction>) {
         let snapshot = tab.snapshot_rx.borrow().clone();
-        let last = snapshot.candles.last().copied();
+        let last = snapshot.full_bars.last().map(|bar| bar.candle);
         let precision = if tab.key.symbol == "ADAUSDT" { 4 } else { 2 };
         let status_text = match &snapshot.status {
             FeedStatus::Loading => "Cargando".to_string(),
@@ -419,7 +419,7 @@ impl ChartApp {
                         .small(),
                 );
                 ui.label(
-                    RichText::new(format!("{} Bars completas", snapshot.full_bar_count))
+                    RichText::new(format!("{} Bars completas", snapshot.full_bars.len()))
                         .color(MUTED)
                         .small(),
                 );
@@ -514,10 +514,10 @@ impl ChartApp {
                         });
                         match chart.kind {
                             ChartKind::Price => {
-                                Self::show_price_chart(ui, tab, chart, &snapshot.candles);
+                                Self::show_price_chart(ui, tab, chart, &snapshot);
                             }
                             ChartKind::Volume => {
-                                Self::show_volume_chart(ui, tab, chart, &snapshot.candles);
+                                Self::show_volume_chart(ui, tab, chart, &snapshot);
                             }
                         }
                     });
@@ -544,27 +544,30 @@ impl ChartApp {
         ui: &mut egui::Ui,
         tab: &ChartTab,
         chart: &Chart,
-        candles: &[crate::market::Candle],
+        snapshot: &ChartSnapshot,
     ) {
-        if candles.is_empty() {
+        // All Charts in this tab observe the same immutable snapshot. Charts
+        // needing non-OHLCV attributes can read `snapshot.full_bars`.
+        let bars = &snapshot.full_bars;
+        if bars.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.label(RichText::new("Esperando history/live…").color(MUTED));
             });
             return;
         }
 
-        let min_price = candles
+        let min_price = bars
             .iter()
-            .map(|candle| candle.low)
+            .map(|bar| bar.candle.low)
             .fold(f64::INFINITY, f64::min);
-        let max_price = candles
+        let max_price = bars
             .iter()
-            .map(|candle| candle.high)
+            .map(|bar| bar.candle.high)
             .fold(f64::NEG_INFINITY, f64::max);
         let price_padding = ((max_price - min_price) * 0.08).max(max_price.abs() * 0.00001);
         let interval = timeframe_seconds(&tab.key.timeframe);
-        let x_min = candles[0].timestamp_ms as f64 / 1_000.0 - interval * 0.75;
-        let x_max = candles[candles.len() - 1].timestamp_ms as f64 / 1_000.0 + interval * 0.75;
+        let x_min = bars[0].timestamp_ms as f64 / 1_000.0 - interval * 0.75;
+        let x_max = bars[bars.len() - 1].timestamp_ms as f64 / 1_000.0 + interval * 0.75;
         let x_link = egui::Id::NULL.with(("ohlcv-time-axis", tab.feed_id));
 
         Plot::new(("ohlcv-price", tab.feed_id, chart.id))
@@ -577,7 +580,8 @@ impl ChartApp {
             .show_x(false)
             .allow_boxed_zoom(false)
             .show(ui, |plot_ui| {
-                for (index, candle) in candles.iter().copied().enumerate() {
+                for (index, bar) in bars.iter().enumerate() {
+                    let candle = bar.candle;
                     let x = candle.timestamp_ms as f64 / 1_000.0;
                     let body_color = if candle.is_bullish() {
                         Color32::BLACK
@@ -623,26 +627,24 @@ impl ChartApp {
         ui: &mut egui::Ui,
         tab: &ChartTab,
         chart: &Chart,
-        candles: &[crate::market::Candle],
+        snapshot: &ChartSnapshot,
     ) {
-        if candles.is_empty() {
+        let bars = &snapshot.full_bars;
+        if bars.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.label(RichText::new("Esperando history/live…").color(MUTED));
             });
             return;
         }
 
-        let max_volume = candles
-            .iter()
-            .map(|candle| candle.volume)
-            .fold(0.0, f64::max);
+        let max_volume = bars.iter().map(|bar| bar.candle.volume).fold(0.0, f64::max);
         let interval = timeframe_seconds(&tab.key.timeframe);
-        let x_min = candles[0].timestamp_ms as f64 / 1_000.0 - interval * 0.75;
-        let x_max = candles[candles.len() - 1].timestamp_ms as f64 / 1_000.0 + interval * 0.75;
-        let bars = candles
+        let x_min = bars[0].timestamp_ms as f64 / 1_000.0 - interval * 0.75;
+        let x_max = bars[bars.len() - 1].timestamp_ms as f64 / 1_000.0 + interval * 0.75;
+        let plotted_bars = bars
             .iter()
-            .map(|candle| {
-                Bar::new(candle.timestamp_ms as f64 / 1_000.0, candle.volume)
+            .map(|bar| {
+                Bar::new(bar.timestamp_ms as f64 / 1_000.0, bar.candle.volume)
                     .width(interval * 0.64)
                     .fill(LIME_GREEN)
                     .stroke(Stroke::new(1.0, LIME_GREEN))
@@ -662,7 +664,7 @@ impl ChartApp {
             .show_y(false)
             .allow_boxed_zoom(false)
             .show(ui, |plot_ui| {
-                plot_ui.bar_chart(BarChart::new("Volumen", bars).allow_hover(false));
+                plot_ui.bar_chart(BarChart::new("Volumen", plotted_bars).allow_hover(false));
             });
     }
 }

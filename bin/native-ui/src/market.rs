@@ -98,8 +98,35 @@ pub enum FeedStatus {
 pub struct ChartSnapshot {
     pub status: FeedStatus,
     pub history_error: Option<String>,
-    pub candles: Arc<[Candle]>,
-    pub full_bar_count: usize,
+    /// Complete, reconciled Bars shared by every Chart in this feed.
+    pub full_bars: Arc<[BarSnapshot]>,
+}
+
+/// Immutable view of a complete Bar published to the UI.
+///
+/// `payload` remains shared with the calculation worker, so publishing a
+/// snapshot clones only its `Arc`, not the full JSON value.
+#[derive(Clone, Debug)]
+pub struct BarSnapshot {
+    pub timestamp_ms: u64,
+    pub candle: Candle,
+    payload: Arc<Value>,
+}
+
+impl BarSnapshot {
+    /// Returns the complete Bar attributes, unwrapping the `data` envelope
+    /// used by live WebSocket events.
+    pub fn attributes(&self) -> &Value {
+        self.payload
+            .get("data")
+            .filter(|value| value.is_object())
+            .unwrap_or(&self.payload)
+    }
+
+    /// Returns the original complete history Bar or live WebSocket event.
+    pub fn source_payload(&self) -> &Value {
+        &self.payload
+    }
 }
 
 impl Default for ChartSnapshot {
@@ -107,8 +134,7 @@ impl Default for ChartSnapshot {
         Self {
             status: FeedStatus::Loading,
             history_error: None,
-            candles: Arc::from([]),
-            full_bar_count: 0,
+            full_bars: Arc::from([]),
         }
     }
 }
@@ -241,14 +267,11 @@ pub fn spawn_calculation_worker(config: CalculationWorkerConfig) -> thread::Join
                 }
 
                 if dirty {
-                    let candles = bars.values().map(|bar| bar.candle).collect::<Vec<_>>();
-                    let full_bar_count =
-                        bars.values().filter(|bar| bar.payload.is_object()).count();
+                    let full_bars = bars.values().map(snapshot_bar).collect::<Vec<_>>();
                     let snapshot = Arc::new(ChartSnapshot {
                         status: status.clone(),
                         history_error: history_error.clone(),
-                        candles: candles.into(),
-                        full_bar_count,
+                        full_bars: full_bars.into(),
                     });
                     snapshot_tx.send_replace(snapshot);
 
@@ -506,6 +529,14 @@ fn parse_bar(
     })
 }
 
+fn snapshot_bar(bar: &StoredBar) -> BarSnapshot {
+    BarSnapshot {
+        timestamp_ms: bar.candle.timestamp_ms,
+        candle: bar.candle,
+        payload: bar.payload.clone(),
+    }
+}
+
 fn project_candle(payload: &Value, needs_price: bool, needs_volume: bool) -> Option<Candle> {
     let bar = payload
         .get("data")
@@ -633,7 +664,7 @@ fn value_as_f64(value: &Value) -> Option<f64> {
 mod tests {
     use super::{
         AppLogger, BarFields, Bytes, CalculationInput, ChartDataRequest, FeedKey, FeedStatus,
-        apply_input, coalesce_live_snapshots, parse_bar,
+        apply_input, coalesce_live_snapshots, parse_bar, snapshot_bar,
     };
     use eframe::egui;
     use serde_json::json;
@@ -675,6 +706,36 @@ mod tests {
         assert_eq!(stored.candle.volume, 2.5);
         assert_eq!(stored.payload["raw_ticks"][0]["id"], "1");
         assert_eq!(stored.payload["footprint"]["levels"][0]["price"], "10000");
+    }
+
+    #[test]
+    fn shared_bar_snapshot_exposes_full_history_and_live_attributes() {
+        let history = parse_bar(full_bar("60000", "1", "3"), true, true, true).unwrap();
+        let history_snapshot = snapshot_bar(&history);
+
+        assert_eq!(history_snapshot.attributes()["raw_ticks"][0]["id"], "1");
+        assert!(std::sync::Arc::ptr_eq(
+            &history.payload,
+            &history_snapshot.payload
+        ));
+
+        let live_event = json!({
+            "event_id": "bar:live:3:abc",
+            "is_final": false,
+            "data": full_bar("60000", "1", "3")
+        });
+        let live = parse_bar(live_event, false, true, true).unwrap();
+        let live_snapshot = snapshot_bar(&live);
+
+        assert_eq!(
+            live_snapshot.attributes()["footprint"]["levels"][0]["price"],
+            "10000"
+        );
+        assert_eq!(live_snapshot.source_payload()["event_id"], "bar:live:3:abc");
+        assert!(std::sync::Arc::ptr_eq(
+            &live.payload,
+            &live_snapshot.payload
+        ));
     }
 
     #[test]

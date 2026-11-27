@@ -18,8 +18,13 @@ Cada tab abre un feed aislado y contiene una lista de Charts. Cada Chart declara
 su límite de history, si requiere live y los campos que calcula. History se pide
 con `include_raw_ticks: true`; el cliente conserva el JSON completo de History y
 de cada evento live para que los Charts puedan calcular desde cualquier atributo
-de Bar. El OHLCV actual solo proyecta precio y `volume_flow.total_qty` para el
-dibujo.
+de Bar. La capa de cálculo reconcilia history y live por timestamp y publica un
+snapshot inmutable compartido por todos los Charts del feed. `ChartSnapshot` expone
+las Bars completas en `full_bars`; `BarSnapshot::attributes()` devuelve los
+atributos de Bar normalizados tanto para history como para eventos live, y
+`source_payload()` permite consultar el payload original. Los datos JSON se
+comparten mediante `Arc`, sin clonar el contenido al publicar el snapshot. El
+OHLCV actual solo proyecta precio y `volume_flow.total_qty` para el dibujo.
 
 El límite inicial es 50 Bars completas. «Cargar 50 Bars más» aumenta el límite
 de la consulta; como el endpoint de history devuelve las últimas `limit` Bars,
