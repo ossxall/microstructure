@@ -20,11 +20,15 @@ con `include_raw_ticks: true`; el cliente conserva el JSON completo de History y
 de cada evento live para que los Charts puedan calcular desde cualquier atributo
 de Bar. La capa de cálculo reconcilia history y live por timestamp y publica un
 snapshot inmutable compartido por todos los Charts del feed. `ChartSnapshot` expone
-las Bars completas en `full_bars`; `BarSnapshot::attributes()` devuelve los
-atributos de Bar normalizados tanto para history como para eventos live, y
-`source_payload()` permite consultar el payload original. Los datos JSON se
-comparten mediante `Arc`, sin clonar el contenido al publicar el snapshot. El
-OHLCV actual solo proyecta precio y `volume_flow.total_qty` para el dibujo.
+las Bars completas en `full_bars`. Para acceder a los campos de una Bar, usa
+`BarSnapshot::attributes()`: devuelve el objeto de Bar tanto para history como
+para eventos live (en estos últimos, extrae el objeto `data`). Usa
+`BarSnapshot::source_payload()` solo si también necesitas el envoltorio del
+evento live y sus metadatos, como `event_id` o `is_final`. En history, el payload
+suele ser directamente el objeto Bar. Ambos métodos exponen la estructura JSON
+parseada, no el texto original byte por byte. Los datos se comparten mediante
+`Arc`, sin clonar el contenido al publicar el snapshot. El OHLCV actual solo
+proyecta precio y `volume_flow.total_qty` para el dibujo.
 
 El límite inicial es 50 Bars completas. «Cargar 50 Bars más» aumenta el límite
 de la consulta; como el endpoint de history devuelve las últimas `limit` Bars,
