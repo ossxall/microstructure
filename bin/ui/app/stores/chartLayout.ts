@@ -4,8 +4,27 @@ import { ref } from 'vue'
 export type ChartId = 'ohlcv' | 'momentum' | 'delta' | 'bidAskFlow'
 
 export const DEFAULT_CHART_ORDER: ChartId[] = ['ohlcv', 'momentum', 'delta', 'bidAskFlow']
+export const DEFAULT_CHART_ENABLED: Record<ChartId, boolean> = {
+  ohlcv: true,
+  momentum: true,
+  delta: true,
+  bidAskFlow: true
+}
 
 const chartIds = new Set<ChartId>(DEFAULT_CHART_ORDER)
+
+export function normalizeChartEnabled(value: unknown): Record<ChartId, boolean> {
+  const storedValues = typeof value === 'object' && value !== null
+    ? value as Partial<Record<ChartId, unknown>>
+    : {}
+
+  return DEFAULT_CHART_ORDER.reduce((enabledCharts, chartId) => {
+    enabledCharts[chartId] = typeof storedValues[chartId] === 'boolean'
+      ? storedValues[chartId] as boolean
+      : DEFAULT_CHART_ENABLED[chartId]
+    return enabledCharts
+  }, {} as Record<ChartId, boolean>)
+}
 
 export function normalizeChartOrder(value: unknown): ChartId[] {
   if (!Array.isArray(value)) {
@@ -22,19 +41,34 @@ export function normalizeChartOrder(value: unknown): ChartId[] {
 
 export const useChartLayoutStore = defineStore('chart-layout', () => {
   const chartOrder = ref<ChartId[]>([...DEFAULT_CHART_ORDER])
+  const chartEnabled = ref<Record<ChartId, boolean>>({ ...DEFAULT_CHART_ENABLED })
 
   function setChartOrder(order: ChartId[]) {
     chartOrder.value = normalizeChartOrder(order)
   }
 
+  function setChartEnabled(chartId: ChartId, enabled: boolean) {
+    chartEnabled.value = {
+      ...normalizeChartEnabled(chartEnabled.value),
+      [chartId]: enabled
+    }
+  }
+
+  function setChartEnabledState(value: unknown) {
+    chartEnabled.value = normalizeChartEnabled(value)
+  }
+
   return {
     chartOrder,
-    setChartOrder
+    chartEnabled,
+    setChartOrder,
+    setChartEnabled,
+    setChartEnabledState
   }
 }, {
   persist: {
     key: 'chart-layout',
     storage: piniaPluginPersistedstate.localStorage(),
-    pick: ['chartOrder']
+    pick: ['chartOrder', 'chartEnabled']
   }
 })

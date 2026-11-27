@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, ref, computed, reactive, nextTick, watch } 
 import { createChart } from '~/packages/open-charts/src'
 import type { AnyChartSeries, ChartEngine } from '~/packages/open-charts/src/core/types'
 import {
+  DEFAULT_CHART_ENABLED,
   DEFAULT_CHART_ORDER,
   normalizeChartOrder,
   useChartLayoutStore,
@@ -96,6 +97,10 @@ const momentumChartHost = ref<HTMLElement | null>(null)
 const deltaChartHost = ref<HTMLElement | null>(null)
 const bidAskFlowChartHost = ref<HTMLElement | null>(null)
 const chartLayoutStore = useChartLayoutStore()
+const chartEnabledReady = ref(false)
+const chartEnabled = computed(() => chartEnabledReady.value
+  ? chartLayoutStore.chartEnabled
+  : DEFAULT_CHART_ENABLED)
 const chartOrder = ref<ChartId[]>([...DEFAULT_CHART_ORDER])
 const chartHostRefCallbacks: Record<ChartId, (element: unknown) => void> = {
   ohlcv: (element) => { chartHost.value = element as HTMLElement | null },
@@ -169,17 +174,142 @@ function moveChart(chartId: ChartId, direction: -1 | 1) {
   chartLayoutStore.setChartOrder(reorderedCharts)
 }
 
+function chartEngineFor(chartId: ChartId): ChartEngine | undefined {
+  switch (chartId) {
+    case 'ohlcv':
+      return chart
+    case 'momentum':
+      return momentumChart
+    case 'delta':
+      return deltaChart
+    case 'bidAskFlow':
+      return bidAskFlowChart
+  }
+}
+
+function hasEnabledCharts(): boolean {
+  return Object.values(chartEnabled.value).some(Boolean)
+}
+
+function hasEnabledDeltaCharts(): boolean {
+  return chartEnabled.value.delta || chartEnabled.value.bidAskFlow
+}
+
+function hydrateChart(chartId: ChartId) {
+  const currentBars = [...bars.values()].sort((left, right) => left.time - right.time)
+  const currentDeltaBars = [...deltaBars.values()].sort((left, right) => left.time - right.time)
+
+  switch (chartId) {
+    case 'ohlcv':
+      rebuildDeltaProfile()
+      if (currentBars.length > 0) {
+        series?.setData(currentBars)
+        attackBubbleSeries?.setData(currentBars)
+        deltaProfileSeries?.setData(currentBars)
+      }
+      deltaProfileSeries?.setParams({ ...profileSettings })
+      attackBubbleSeries?.setVisible(showAttackBubbles.value)
+      applyAttackBubbleSettings()
+      refreshAttackBubbleCount()
+      if (
+        hasSelectedInitialTimeframe.value
+        && profileHistoryLimit(timeframe.value) > HISTORY_LIMIT
+      ) {
+        void resyncDeltaProfileHistory(
+          source.value,
+          symbol.value,
+          timeframe.value,
+          feedGeneration,
+          profileHistoryLimit(timeframe.value)
+        )
+      }
+      break
+    case 'momentum':
+      if (currentBars.length > 0) {
+        momentumSeries?.setData(currentBars)
+      }
+      momentumSeries?.setParams(momentumParamsPatch())
+      refreshMomentumStatus(currentBars)
+      break
+    case 'delta':
+      if (currentDeltaBars.length > 0) {
+        deltaCandleSeries?.setData(currentDeltaBars)
+      }
+      deltaCandleSeries?.setParams({
+        mode: deltaMode.value,
+        baseClose: deltaCvdBase
+      })
+      refreshDeltaCandleCount()
+      break
+    case 'bidAskFlow':
+      if (currentDeltaBars.length > 0) {
+        bidAskFlowSeries?.setData(currentDeltaBars)
+      }
+      bidAskFlowSeries?.setParams({ style: flowCandleStyle.value })
+      refreshBidAskFlowCandleCount()
+      break
+  }
+}
+
+async function toggleChart(chartId: ChartId) {
+  const wasAnyEnabled = hasEnabledCharts()
+  const enabled = !chartEnabled.value[chartId]
+  chartLayoutStore.setChartEnabled(chartId, enabled)
+  const engine = chartEngineFor(chartId)
+
+  if (!enabled) {
+    engine?.core.pauseLoop()
+    if (!hasEnabledCharts()) {
+      feedGeneration++
+      isLoading.value = false
+      stopWebSocket()
+      feedAbortController?.abort()
+      feedAbortController = undefined
+    }
+    return
+  }
+
+  if (!wasAnyEnabled && hasSelectedInitialTimeframe.value) {
+    await loadMarketData(source.value, symbol.value, timeframe.value)
+  } else {
+    hydrateChart(chartId)
+    if (
+      wasAnyEnabled
+      && hasSelectedInitialTimeframe.value
+      && (chartId === 'delta' || chartId === 'bidAskFlow')
+    ) {
+      void resyncDeltaHistory(source.value, symbol.value, timeframe.value, feedGeneration)
+    }
+  }
+
+  if (activeTab.value === 'charts' && engine) {
+    await nextTick()
+    engine.core.resize()
+    engine.core.startLoop()
+  }
+}
+
 watch(activeTab, async (tab) => {
-  const chartEngines = [chart, momentumChart, deltaChart, bidAskFlowChart]
+  const chartEngines: [ChartId, ChartEngine | undefined][] = [
+    ['ohlcv', chart],
+    ['momentum', momentumChart],
+    ['delta', deltaChart],
+    ['bidAskFlow', bidAskFlowChart]
+  ]
 
   if (tab === 'settings') {
-    chartEngines.forEach(chartEngine => chartEngine?.core.pauseLoop())
+    chartEngines.forEach(([, chartEngine]) => chartEngine?.core.pauseLoop())
     return
   }
 
   await nextTick()
-  chartEngines.forEach((chartEngine) => {
+  chartEngines.forEach(([chartId, chartEngine]) => {
     if (!chartEngine) {
+      return
+    }
+
+    if (!chartEnabled.value[chartId]) {
+      chartEngine.core.pauseLoop()
       return
     }
 
@@ -210,6 +340,7 @@ let bidAskFlowSeries: AnyChartSeries | undefined
 let deltaProfileSeries: AnyChartSeries | undefined
 let socket: WebSocket | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+let feedAbortController: AbortController | undefined
 let feedGeneration = 0
 
 const chartColorPalettes = {
@@ -450,6 +581,10 @@ function upsertBar(bar: Bar): boolean {
 }
 
 function refreshAttackBubbleCount() {
+  if (!chartEnabled.value.ohlcv) {
+    return
+  }
+
   const orderedBars = [...bars.values()].sort((left, right) => left.time - right.time)
   const params = attackBubbleSeries?.getParams()
   const optionValue = (key: keyof AttackBubbleOptions) => {
@@ -468,7 +603,9 @@ function refreshAttackBubbleCount() {
 }
 
 function toggleAttackBubbles() {
-  attackBubbleSeries?.setVisible(showAttackBubbles.value)
+  if (chartEnabled.value.ohlcv) {
+    attackBubbleSeries?.setVisible(showAttackBubbles.value)
+  }
 }
 
 function applyAttackBubbleSettings() {
@@ -489,11 +626,13 @@ function applyAttackBubbleSettings() {
     Math.max(5, Math.round(Number.isFinite(baselineBars) ? baselineBars : 20))
   )
 
-  attackBubbleSeries?.setParams({
-    minDominance: attackMinDominancePercent.value / 100,
-    minRelativeVolume: attackMinRelativeVolume.value,
-    baselineBars: attackBaselineBars.value
-  })
+  if (chartEnabled.value.ohlcv) {
+    attackBubbleSeries?.setParams({
+      minDominance: attackMinDominancePercent.value / 100,
+      minRelativeVolume: attackMinRelativeVolume.value,
+      baselineBars: attackBaselineBars.value
+    })
+  }
   refreshAttackBubbleCount()
 }
 
@@ -634,23 +773,31 @@ function upsertDeltaBar(bar: DeltaBar): boolean {
     deltaBars.delete(time)
   })
 
-  deltaCandleSeries?.upsert(bar, { maxDataPoints: DELTA_HISTORY_LIMIT })
-  if (baseChanged) {
-    deltaCandleSeries?.setParams({ baseClose: deltaCvdBase })
+  if (chartEnabled.value.delta) {
+    deltaCandleSeries?.upsert(bar, { maxDataPoints: DELTA_HISTORY_LIMIT })
+    if (baseChanged) {
+      deltaCandleSeries?.setParams({ baseClose: deltaCvdBase })
+    }
+    refreshDeltaCandleCount()
   }
-  bidAskFlowSeries?.upsert(bar, { maxDataPoints: DELTA_HISTORY_LIMIT })
-  refreshDeltaCandleCount()
-  refreshBidAskFlowCandleCount()
+  if (chartEnabled.value.bidAskFlow) {
+    bidAskFlowSeries?.upsert(bar, { maxDataPoints: DELTA_HISTORY_LIMIT })
+    refreshBidAskFlowCandleCount()
+  }
   return true
 }
 
 function applyDeltaMode() {
-  deltaCandleSeries?.setParams({ mode: deltaMode.value })
-  refreshDeltaCandleCount()
+  if (chartEnabled.value.delta) {
+    deltaCandleSeries?.setParams({ mode: deltaMode.value })
+    refreshDeltaCandleCount()
+  }
 }
 
 function applyFlowCandleStyle() {
-  bidAskFlowSeries?.setParams({ style: flowCandleStyle.value })
+  if (chartEnabled.value.bidAskFlow) {
+    bidAskFlowSeries?.setParams({ style: flowCandleStyle.value })
+  }
 }
 
 function renderCurrentBars() {
@@ -660,20 +807,28 @@ function renderCurrentBars() {
     return
   }
 
-  if (currentBars.length > 0) {
+  if (currentBars.length > 0 && chartEnabled.value.ohlcv) {
     // Full replacement is reserved for initial history hydration.
     series.setData(currentBars)
     attackBubbleSeries?.setData(currentBars)
     deltaProfileSeries?.setData(currentBars)
+  }
+  if (currentBars.length > 0 && chartEnabled.value.momentum) {
     momentumSeries?.setData(currentBars)
   }
 
   seriesHydrated = true
-  refreshDeltaProfile(true)
+  if (chartEnabled.value.ohlcv) {
+    refreshDeltaProfile(true)
+  }
   refreshMomentumStatus(currentBars)
 }
 
 function refreshMomentumStatus(currentBars = [...bars.values()].sort((left, right) => left.time - right.time)) {
+  if (!chartEnabled.value.momentum) {
+    return
+  }
+
   try {
     const points = calculateMomentumSeries(currentBars, momentumSettings)
     momentumPointCount.value = points.filter(point => point.bullish !== null).length
@@ -699,7 +854,7 @@ async function fetchMarketHistory(
   nextSource: MarketSource,
   nextSymbol: string,
   nextTimeframe: Timeframe,
-  options: { limit?: number, includeRawTicks?: boolean } = {}
+  options: { limit?: number, includeRawTicks?: boolean, signal?: AbortSignal } = {}
 ): Promise<Bar[]> {
   if (!isCurrentTimeframe(nextTimeframe)) {
     return []
@@ -708,6 +863,7 @@ async function fetchMarketHistory(
   const response = await $fetch<HistoryResponse>('/api/market/get-history', {
     method: 'POST',
     timeout: HISTORY_REQUEST_TIMEOUT_MS,
+    signal: options.signal,
     body: {
       source: nextSource,
       symbol: nextSymbol,
@@ -730,7 +886,8 @@ async function fetchMarketHistory(
 async function fetchDeltaHistory(
   nextSource: MarketSource,
   nextSymbol: string,
-  nextTimeframe: Timeframe
+  nextTimeframe: Timeframe,
+  signal?: AbortSignal
 ): Promise<DeltaBar[]> {
   if (!isCurrentTimeframe(nextTimeframe)) {
     return []
@@ -739,6 +896,7 @@ async function fetchDeltaHistory(
   const response = await $fetch<HistoryResponse>('/api/market/get-history', {
     method: 'POST',
     timeout: HISTORY_REQUEST_TIMEOUT_MS,
+    signal,
     body: {
       source: nextSource,
       symbol: nextSymbol,
@@ -761,7 +919,7 @@ async function fetchDeltaHistory(
 function refreshDeltaProfile(force = false) {
   profileBarCount.value = deltaProfile.activeBarCount
 
-  if (!force && !profileSettings.autoUpdate) {
+  if (!chartEnabled.value.ohlcv || (!force && !profileSettings.autoUpdate)) {
     return
   }
 
@@ -771,7 +929,18 @@ function refreshDeltaProfile(force = false) {
   }
 }
 
+function rebuildDeltaProfile() {
+  deltaProfile.reset(symbol.value, source.value, timeframe.value)
+  const currentBars = [...bars.values()].sort((left, right) => left.time - right.time)
+  currentBars.forEach(bar => deltaProfile.upsert(bar))
+  refreshDeltaProfile(true)
+}
+
 function upsertDeltaProfileBar(bar: Bar): boolean {
+  if (!chartEnabled.value.ohlcv) {
+    return false
+  }
+
   const changed = deltaProfile.upsert(bar)
   if (changed) {
     refreshDeltaProfile()
@@ -786,7 +955,11 @@ async function resyncDeltaProfileHistory(
   generation: number,
   limit = profileHistoryLimit(nextTimeframe)
 ) {
-  if (generation !== feedGeneration || !isCurrentTimeframe(nextTimeframe)) {
+  if (
+    generation !== feedGeneration
+    || !chartEnabled.value.ohlcv
+    || !isCurrentTimeframe(nextTimeframe)
+  ) {
     return
   }
 
@@ -795,11 +968,16 @@ async function resyncDeltaProfileHistory(
       nextSource,
       nextSymbol,
       nextTimeframe,
-      { limit, includeRawTicks: false }
+      {
+        limit,
+        includeRawTicks: false,
+        signal: feedAbortController?.signal
+      }
     )
 
     if (
       generation !== feedGeneration
+      || !chartEnabled.value.ohlcv
       || !isCurrentTimeframe(nextTimeframe)
     ) {
       return
@@ -811,7 +989,7 @@ async function resyncDeltaProfileHistory(
     }
     refreshDeltaProfile()
   } catch (error) {
-    if (generation === feedGeneration) {
+    if (generation === feedGeneration && chartEnabled.value.ohlcv) {
       profileDiagnostic.value = error instanceof Error
         ? `No se pudo resincronizar el histórico ${nextTimeframe} del Delta Profile: ${error.message}`
         : `No se pudo resincronizar el histórico ${nextTimeframe} del Delta Profile`
@@ -825,40 +1003,52 @@ async function resyncMarketHistory(
   nextTimeframe: Timeframe,
   generation: number
 ) {
-  if (generation !== feedGeneration || !isCurrentTimeframe(nextTimeframe)) {
+  if (
+    generation !== feedGeneration
+    || (!chartEnabled.value.ohlcv && !chartEnabled.value.momentum)
+    || !isCurrentTimeframe(nextTimeframe)
+  ) {
     return
   }
 
   try {
     const history = await fetchMarketHistory(nextSource, nextSymbol, nextTimeframe, {
-      includeRawTicks: false
+      includeRawTicks: false,
+      signal: feedAbortController?.signal
     })
 
-    if (generation !== feedGeneration) {
+    if (
+      generation !== feedGeneration
+      || (!chartEnabled.value.ohlcv && !chartEnabled.value.momentum)
+    ) {
       return
     }
 
     let profileChanged = false
-    for (const bar of history) {
-      profileChanged = deltaProfile.upsert(bar) || profileChanged
+    if (chartEnabled.value.ohlcv) {
+      for (const bar of history) {
+        profileChanged = deltaProfile.upsert(bar) || profileChanged
+      }
     }
     if (profileChanged) {
       refreshDeltaProfile()
     }
 
     const changedBars = history.filter(upsertBar)
-    if (!seriesHydrated || !series) {
-      return
-    }
-
     // Apply bars oldest-first: missed bars then take the cheap append path,
     // while any late revision is recomputed before newer bars are appended.
     changedBars.sort((left, right) => left.time - right.time)
-    for (const bar of changedBars) {
-      series.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
-      attackBubbleSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
-      deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
-      momentumSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+    if (seriesHydrated) {
+      for (const bar of changedBars) {
+        if (chartEnabled.value.ohlcv && series) {
+          series.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+          attackBubbleSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+          deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+        }
+        if (chartEnabled.value.momentum) {
+          momentumSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+        }
+      }
     }
     refreshMomentumStatus([...bars.values()].sort((left, right) => left.time - right.time))
 
@@ -866,7 +1056,10 @@ async function resyncMarketHistory(
       errorMessage.value = ''
     }
   } catch (error) {
-    if (generation === feedGeneration) {
+    if (
+      generation === feedGeneration
+      && (chartEnabled.value.ohlcv || chartEnabled.value.momentum)
+    ) {
       errorMessage.value = error instanceof Error
         ? `Resincronización: ${error.message}`
         : 'No se pudo resincronizar el histórico'
@@ -880,14 +1073,23 @@ async function resyncDeltaHistory(
   nextTimeframe: Timeframe,
   generation: number
 ) {
-  if (generation !== feedGeneration || !isCurrentTimeframe(nextTimeframe)) {
+  if (
+    generation !== feedGeneration
+    || !hasEnabledDeltaCharts()
+    || !isCurrentTimeframe(nextTimeframe)
+  ) {
     return
   }
 
   try {
-    const history = await fetchDeltaHistory(nextSource, nextSymbol, nextTimeframe)
+    const history = await fetchDeltaHistory(
+      nextSource,
+      nextSymbol,
+      nextTimeframe,
+      feedAbortController?.signal
+    )
 
-    if (generation !== feedGeneration) {
+    if (generation !== feedGeneration || !hasEnabledDeltaCharts()) {
       return
     }
 
@@ -896,7 +1098,7 @@ async function resyncDeltaHistory(
       upsertDeltaBar(bar)
     }
   } catch (error) {
-    if (generation === feedGeneration) {
+    if (generation === feedGeneration && hasEnabledDeltaCharts()) {
       profileDiagnostic.value = error instanceof Error
         ? `No se pudo cargar el histórico de velas de delta: ${error.message}`
         : 'No se pudo cargar el histórico de velas de delta'
@@ -923,7 +1125,11 @@ function connectWebSocket(
   generation: number,
   resyncAfterConnect = false
 ) {
-  if (generation !== feedGeneration || !isCurrentTimeframe(nextTimeframe)) {
+  if (
+    generation !== feedGeneration
+    || !hasEnabledCharts()
+    || !isCurrentTimeframe(nextTimeframe)
+  ) {
     return
   }
 
@@ -977,12 +1183,14 @@ function connectWebSocket(
                 generation
               )
             }
-            void resyncDeltaHistory(
-              nextSource,
-              nextSymbol,
-              nextTimeframe,
-              generation
-            )
+            if (hasEnabledDeltaCharts()) {
+              void resyncDeltaHistory(
+                nextSource,
+                nextSymbol,
+                nextTimeframe,
+                generation
+              )
+            }
           }
           return
         }
@@ -1008,11 +1216,15 @@ function connectWebSocket(
         if (bar && matchesTimeframe(bar, nextTimeframe)) {
           upsertDeltaProfileBar(bar)
           if (upsertBar(bar) && seriesHydrated) {
-            series?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
-            attackBubbleSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
-            deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
-            momentumSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
-            refreshMomentumStatus()
+            if (chartEnabled.value.ohlcv) {
+              series?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+              attackBubbleSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+              deltaProfileSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+            }
+            if (chartEnabled.value.momentum) {
+              momentumSeries?.upsert(bar, { maxDataPoints: HISTORY_LIMIT })
+              refreshMomentumStatus()
+            }
           }
         }
       } catch {
@@ -1047,11 +1259,13 @@ async function loadMarketData(
   nextSymbol: string,
   nextTimeframe: Timeframe
 ) {
-  if (!isCurrentTimeframe(nextTimeframe)) {
+  if (!hasEnabledCharts() || !isCurrentTimeframe(nextTimeframe)) {
     return
   }
 
+  feedAbortController?.abort()
   const generation = ++feedGeneration
+  feedAbortController = new AbortController()
   isLoading.value = true
   errorMessage.value = ''
   seriesHydrated = false
@@ -1075,11 +1289,14 @@ async function loadMarketData(
   replaceDeltaCandleSeries()
   replaceBidAskFlowSeries()
   connectWebSocket(nextSource, nextSymbol, nextTimeframe, generation)
-  void resyncDeltaHistory(nextSource, nextSymbol, nextTimeframe, generation)
+  if (hasEnabledDeltaCharts()) {
+    void resyncDeltaHistory(nextSource, nextSymbol, nextTimeframe, generation)
+  }
 
   try {
     const history = await fetchMarketHistory(nextSource, nextSymbol, nextTimeframe, {
-      includeRawTicks: false
+      includeRawTicks: false,
+      signal: feedAbortController.signal
     })
 
     if (generation !== feedGeneration) {
@@ -1163,7 +1380,9 @@ function applyDeltaProfileSettings() {
     Math.max(1, Number(profileSettings.valueAreaPercentage) || 70)
   )
   deltaProfile.configure({ ...profileSettings })
-  deltaProfileSeries?.setParams({ ...profileSettings })
+  if (chartEnabled.value.ohlcv) {
+    deltaProfileSeries?.setParams({ ...profileSettings })
+  }
   refreshDeltaProfile(true)
   if (
     isCurrentTimeframe(timeframe.value)
@@ -1183,9 +1402,12 @@ async function applyMomentumSettings() {
   const previousTimestampUnit = momentumSettings.timestampUnit
   const options = normalizeMomentumOptions(momentumSettings)
   Object.assign(momentumSettings, options)
-  momentumSeries?.setParams(momentumParamsPatch(options))
+  if (chartEnabled.value.momentum) {
+    momentumSeries?.setParams(momentumParamsPatch(options))
+  }
   if (
     previousTimestampUnit !== options.timestampUnit
+    && chartEnabled.value.momentum
     && hasSelectedInitialTimeframe.value
   ) {
     await loadMarketData(source.value, symbol.value, timeframe.value)
@@ -1205,6 +1427,8 @@ function selectDeltaProfileWindow() {
 }
 
 onMounted(async () => {
+  chartLayoutStore.setChartEnabledState(chartLayoutStore.chartEnabled)
+  chartEnabledReady.value = true
   const savedChartOrder = normalizeChartOrder(chartLayoutStore.chartOrder)
   chartOrder.value = savedChartOrder
   chartLayoutStore.setChartOrder(savedChartOrder)
@@ -1240,13 +1464,20 @@ onMounted(async () => {
 
   await nextTick()
   const chartEngines = [chart, momentumChart, deltaChart, bidAskFlowChart]
-  chartEngines.forEach((engine) => {
-    engine?.core.resize()
+  chartEngines.forEach((engine, index) => {
+    const chartId = DEFAULT_CHART_ORDER[index]
+    if (chartId && chartEnabled.value[chartId]) {
+      engine?.core.resize()
+    } else {
+      engine?.core.pauseLoop()
+    }
   })
 })
 
 onBeforeUnmount(() => {
   feedGeneration++
+  feedAbortController?.abort()
+  feedAbortController = undefined
   unsubscribeChartEvents?.()
   unsubscribeChartEvents = undefined
   stopWebSocket()
@@ -1934,10 +2165,10 @@ onBeforeUnmount(() => {
         <section
           v-for="(chartId, index) in chartOrder"
           :key="chartId"
-          class="flex flex-col gap-3"
+          class="relative flex flex-col gap-3"
           :aria-labelledby="`${chartId}-chart-title`"
         >
-          <header class="flex items-start justify-between gap-3">
+          <header class="relative z-20 flex items-start justify-between gap-3">
             <div>
               <h2
                 :id="`${chartId}-chart-title`"
@@ -1968,8 +2199,24 @@ onBeforeUnmount(() => {
             <div
               class="flex shrink-0 items-center gap-1"
               role="group"
-              :aria-label="`Controles de posición para ${chartLabels[chartId]}`"
+              :aria-label="`Controles de ${chartLabels[chartId]}`"
             >
+              <button
+                type="button"
+                class="inline-flex min-h-9 items-center gap-2 rounded-md border border-default bg-elevated/30 px-3 text-sm text-highlighted transition-colors hover:bg-elevated/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                :class="chartEnabled[chartId] ? 'text-success' : 'text-muted'"
+                :aria-label="`${chartEnabled[chartId] ? 'Apagar' : 'Encender'} ${chartLabels[chartId]}`"
+                :aria-pressed="chartEnabled[chartId]"
+                :title="`${chartEnabled[chartId] ? 'Apagar' : 'Encender'} ${chartLabels[chartId]}`"
+                @click="toggleChart(chartId)"
+              >
+                <UIcon
+                  name="i-lucide-power"
+                  class="size-4"
+                  aria-hidden="true"
+                />
+                {{ chartEnabled[chartId] ? 'Apagar' : 'Encender' }}
+              </button>
               <button
                 type="button"
                 class="size-9 rounded-md border border-default bg-elevated/30 text-highlighted transition-colors hover:bg-elevated/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-40"
@@ -2071,6 +2318,13 @@ onBeforeUnmount(() => {
             >
               Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
             </div>
+          </div>
+          <div
+            v-if="!chartEnabled[chartId]"
+            class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-default/50 text-sm font-medium text-highlighted"
+            role="status"
+          >
+            {{ chartLabels[chartId] }} apagado
           </div>
         </section>
       </div>
