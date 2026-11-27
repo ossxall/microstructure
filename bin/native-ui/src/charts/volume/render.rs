@@ -34,7 +34,7 @@ pub fn show(
         .collect();
 
     Plot::new(("ohlcv-volume", feed_id, chart_id))
-        .height(170.0)
+        .height(ui.available_height().max(120.0))
         .default_x_bounds(x_min, x_max)
         .default_y_bounds(0.0, (max_volume * 1.25).max(1.0))
         .link_axis(

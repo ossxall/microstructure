@@ -9,7 +9,7 @@ use tokio::sync::watch;
 
 use crate::{
     app_log::{AppLogger, LogLevel, format_elapsed},
-    charts::{self, Chart, ChartDropPosition, ChartKind},
+    charts::{self, Chart, ChartKind},
     market::{
         CalculationWorkerConfig, ChartDataRequest, ChartSnapshot, DEFAULT_HISTORY_LIMIT, FeedKey,
         FeedStatus, spawn_calculation_worker,
@@ -21,14 +21,14 @@ use crate::{
 struct ChartTab {
     feed_id: u64,
     key: FeedKey,
-    /// This tab's chart instances and their display order.
+    /// This tab's chart windows and their initial display order.
     charts: ChartLayout,
     requested_history: u64,
     _calculation_tx: mpsc::Sender<crate::market::CalculationInput>,
     snapshot_rx: watch::Receiver<Arc<ChartSnapshot>>,
 }
 
-type ChartLayout = Vec<Vec<Chart>>;
+type ChartLayout = Vec<Chart>;
 
 pub struct ChartApp {
     tabs: Vec<ChartTab>,
@@ -44,20 +44,8 @@ pub struct ChartApp {
 
 #[derive(Clone, Copy)]
 enum TabAction {
-    AddChart {
-        feed_id: u64,
-        kind: ChartKind,
-    },
-    RemoveChart {
-        feed_id: u64,
-        chart_id: u64,
-    },
-    MoveChart {
-        feed_id: u64,
-        dragged_chart_id: u64,
-        target_chart_id: u64,
-        position: ChartDropPosition,
-    },
+    AddChart { feed_id: u64, kind: ChartKind },
+    RemoveChart { feed_id: u64, chart_id: u64 },
     LoadMoreHistory,
 }
 
@@ -172,7 +160,7 @@ impl ChartApp {
         };
         let chart_layout = ChartKind::ALL
             .into_iter()
-            .map(|kind| vec![self.new_chart(kind)])
+            .map(|kind| self.new_chart(kind))
             .collect::<Vec<_>>();
         let requests = Self::chart_requests(&chart_layout, DEFAULT_HISTORY_LIMIT);
         let requested_history = requests
@@ -229,7 +217,6 @@ impl ChartApp {
     fn chart_requests(chart_layout: &ChartLayout, history_limit: u64) -> Vec<ChartDataRequest> {
         chart_layout
             .iter()
-            .flatten()
             .map(|chart| chart.data_request(history_limit))
             .collect()
     }
@@ -330,31 +317,6 @@ impl ChartApp {
         );
     }
 
-    fn move_chart(
-        &mut self,
-        feed_id: u64,
-        dragged_chart_id: u64,
-        target_chart_id: u64,
-        position: ChartDropPosition,
-    ) {
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.feed_id == feed_id) else {
-            return;
-        };
-
-        if move_chart_in_layout(&mut tab.charts, dragged_chart_id, target_chart_id, position) {
-            let position_label = match position {
-                ChartDropPosition::Above => "encima",
-                ChartDropPosition::Below => "debajo",
-                ChartDropPosition::Left => "a la izquierda",
-                ChartDropPosition::Right => "a la derecha",
-            };
-            self.logger.info(
-                Some(feed_label(&tab.key)),
-                format!("Chart colocado {position_label} del destino en esta pestaña"),
-            );
-        }
-    }
-
     fn show_log_window(&mut self, ctx: &egui::Context) {
         if !self.logs_open {
             self.logger.set_dialog_open(false);
@@ -415,9 +377,8 @@ impl ChartApp {
     fn show_tab_content(
         ui: &mut egui::Ui,
         tab: &ChartTab,
-        chart_layout: &ChartLayout,
         action: &mut Option<TabAction>,
-    ) {
+    ) -> egui::Rect {
         let snapshot = tab.snapshot_rx.borrow().clone();
         let last = snapshot.full_bars.last().map(|bar| bar.candle);
         let precision = if tab.key.symbol == "ADAUSDT" { 4 } else { 2 };
@@ -515,37 +476,17 @@ impl ChartApp {
         });
 
         ui.separator();
-        let chart_count = chart_layout.iter().map(Vec::len).sum::<usize>();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for row in chart_layout {
-                ui.columns(row.len(), |columns| {
-                    for (column, chart) in columns.iter_mut().zip(row.iter().copied()) {
-                        let response = charts::show(
-                            column,
-                            chart,
-                            tab.feed_id,
-                            &tab.key.timeframe,
-                            &snapshot,
-                            chart_count > 1,
-                        );
-                        if response.close {
-                            *action = Some(TabAction::RemoveChart {
-                                feed_id: tab.feed_id,
-                                chart_id: chart.id,
-                            });
-                        } else if let Some(drop) = response.drop {
-                            *action = Some(TabAction::MoveChart {
-                                feed_id: tab.feed_id,
-                                dragged_chart_id: drop.dragged_chart_id,
-                                target_chart_id: drop.target_chart_id,
-                                position: drop.position,
-                            });
-                        }
-                    }
-                });
-                ui.add_space(8.0);
-            }
-        });
+        ui.add_space(4.0);
+        let available = ui.available_rect_before_wrap();
+        let footer_height = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+        let chart_area = egui::Rect::from_min_max(
+            available.min,
+            egui::pos2(
+                available.max.x,
+                (available.max.y - footer_height).max(available.min.y),
+            ),
+        );
+        ui.allocate_rect(chart_area, egui::Sense::hover());
 
         ui.horizontal(|ui| {
             ui.label(RichText::new("●").color(LIME));
@@ -560,12 +501,14 @@ impl ChartApp {
                 );
             });
         });
+        chart_area
     }
 }
 
 impl eframe::App for ChartApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let mut action = None;
+        let mut chart_area = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(14.0))
             .show(ui, |ui| {
@@ -574,7 +517,7 @@ impl eframe::App for ChartApp {
                 ui.add_space(8.0);
 
                 if let Some(tab) = self.tabs.get(self.active_tab) {
-                    Self::show_tab_content(ui, tab, &tab.charts, &mut action);
+                    chart_area = Some(Self::show_tab_content(ui, tab, &mut action));
                 } else {
                     ui.add_space(48.0);
                     ui.vertical_centered(|ui| {
@@ -588,6 +531,32 @@ impl eframe::App for ChartApp {
                 }
             });
 
+        if let (Some(tab), Some(chart_area)) = (self.tabs.get(self.active_tab), chart_area) {
+            let chart_count = tab.charts.len();
+            let snapshot = tab.snapshot_rx.borrow().clone();
+            for (index, chart) in tab.charts.iter().copied().enumerate() {
+                let (default_pos, default_size, min_size) =
+                    chart_window_geometry(chart_area, index, chart_count);
+                if charts::show_window(
+                    ui.ctx(),
+                    chart,
+                    tab.feed_id,
+                    &tab.key.timeframe,
+                    &snapshot,
+                    chart_area,
+                    default_pos,
+                    default_size,
+                    min_size,
+                    chart_count > 1,
+                ) {
+                    action = Some(TabAction::RemoveChart {
+                        feed_id: tab.feed_id,
+                        chart_id: chart.id,
+                    });
+                }
+            }
+        }
+
         self.show_log_window(ui.ctx());
 
         match action {
@@ -595,12 +564,6 @@ impl eframe::App for ChartApp {
             Some(TabAction::RemoveChart { feed_id, chart_id }) => {
                 self.remove_chart(feed_id, chart_id)
             }
-            Some(TabAction::MoveChart {
-                feed_id,
-                dragged_chart_id,
-                target_chart_id,
-                position,
-            }) => self.move_chart(feed_id, dragged_chart_id, target_chart_id, position),
             Some(TabAction::LoadMoreHistory) => self.load_more_history(),
             None => {}
         }
@@ -612,193 +575,70 @@ fn feed_label(key: &FeedKey) -> String {
 }
 
 fn add_chart_to_layout(chart_layout: &mut ChartLayout, chart: Chart) {
-    chart_layout.push(vec![chart]);
+    chart_layout.push(chart);
 }
 
 fn remove_chart_from_layout(chart_layout: &mut ChartLayout, chart_id: u64) -> bool {
-    if chart_layout.iter().map(Vec::len).sum::<usize>() <= 1 {
+    if chart_layout.len() <= 1 {
         return false;
     }
-    let Some(row_index) = chart_layout
-        .iter()
-        .position(|row| row.iter().any(|chart| chart.id == chart_id))
-    else {
+    let Some(chart_index) = chart_layout.iter().position(|chart| chart.id == chart_id) else {
         return false;
     };
-    let row = &mut chart_layout[row_index];
-    let Some(chart_index) = row.iter().position(|chart| chart.id == chart_id) else {
-        return false;
-    };
-    row.remove(chart_index);
-    if row.is_empty() {
-        chart_layout.remove(row_index);
-    }
+    chart_layout.remove(chart_index);
     true
 }
 
-fn move_chart_in_layout(
-    chart_layout: &mut ChartLayout,
-    dragged_chart_id: u64,
-    target_chart_id: u64,
-    position: ChartDropPosition,
-) -> bool {
-    if dragged_chart_id == target_chart_id {
-        return false;
-    }
-
-    let Some(dragged_row) = chart_layout
-        .iter()
-        .position(|row| row.iter().any(|chart| chart.id == dragged_chart_id))
-    else {
-        return false;
-    };
-    let Some(dragged_index) = chart_layout[dragged_row]
-        .iter()
-        .position(|chart| chart.id == dragged_chart_id)
-    else {
-        return false;
-    };
-    if !chart_layout
-        .iter()
-        .flatten()
-        .any(|chart| chart.id == target_chart_id)
-    {
-        return false;
-    }
-
-    let original_order = chart_layout
-        .iter()
-        .map(|row| row.iter().map(|chart| chart.id).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-    let dragged_chart = chart_layout[dragged_row].remove(dragged_index);
-    if chart_layout[dragged_row].is_empty() {
-        chart_layout.remove(dragged_row);
-    }
-
-    let Some(target_row) = chart_layout
-        .iter()
-        .position(|row| row.iter().any(|chart| chart.id == target_chart_id))
-    else {
-        return false;
-    };
-    match position {
-        ChartDropPosition::Above => chart_layout.insert(target_row, vec![dragged_chart]),
-        ChartDropPosition::Below => {
-            chart_layout.insert(target_row + 1, vec![dragged_chart]);
-        }
-        ChartDropPosition::Left | ChartDropPosition::Right => {
-            let target_index = chart_layout[target_row]
-                .iter()
-                .position(|chart| chart.id == target_chart_id)
-                .expect("target chart row was found");
-            let insertion_index = target_index + usize::from(position == ChartDropPosition::Right);
-            chart_layout[target_row].insert(insertion_index, dragged_chart);
-        }
-    }
-
-    chart_layout
-        .iter()
-        .map(|row| row.iter().map(|chart| chart.id).collect::<Vec<_>>())
-        .ne(original_order)
+fn chart_window_geometry(
+    chart_area: egui::Rect,
+    index: usize,
+    chart_count: usize,
+) -> (egui::Pos2, egui::Vec2, egui::Vec2) {
+    let columns = (chart_count.max(1) as f32).sqrt().ceil() as usize;
+    let rows = chart_count.max(1).div_ceil(columns);
+    let gap = 12.0;
+    let width = ((chart_area.width() - gap * (columns + 1) as f32) / columns as f32).max(1.0);
+    let height = ((chart_area.height() - gap * (rows + 1) as f32) / rows as f32).max(1.0);
+    let column = index % columns;
+    let row = index / columns;
+    let size = egui::vec2(width, height).min(chart_area.size());
+    let position = egui::pos2(
+        chart_area.left() + gap + column as f32 * (width + gap),
+        chart_area.top() + gap + row as f32 * (height + gap),
+    );
+    let min_size = egui::vec2((size.x * 0.55).min(260.0), (size.y * 0.55).min(180.0))
+        .max(egui::vec2(1.0, 1.0));
+    (position, size, min_size)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::charts::{Chart, ChartDropPosition, ChartKind};
+    use crate::charts::{Chart, ChartKind};
 
-    use super::{ChartLayout, add_chart_to_layout, move_chart_in_layout, remove_chart_from_layout};
+    use super::{
+        ChartLayout, add_chart_to_layout, chart_window_geometry, remove_chart_from_layout,
+    };
+    use eframe::egui::{Rect, pos2};
 
     fn layout(ids: &[u64]) -> ChartLayout {
         ids.iter()
-            .map(|id| vec![Chart::new(*id, ChartKind::Price)])
+            .map(|id| Chart::new(*id, ChartKind::Price))
             .collect()
     }
 
-    fn ids(chart_layout: &ChartLayout) -> Vec<Vec<u64>> {
-        chart_layout
-            .iter()
-            .map(|row| row.iter().map(|chart| chart.id).collect())
-            .collect()
+    fn ids(chart_layout: &ChartLayout) -> Vec<u64> {
+        chart_layout.iter().map(|chart| chart.id).collect()
     }
 
     #[test]
-    fn moving_chart_before_another_changes_only_the_requested_order() {
-        let mut charts = layout(&[1, 2, 3]);
+    fn chart_windows_start_inside_the_tab_chart_area() {
+        let area = Rect::from_min_max(pos2(20.0, 40.0), pos2(1220.0, 740.0));
 
-        assert!(move_chart_in_layout(
-            &mut charts,
-            3,
-            1,
-            ChartDropPosition::Above
-        ));
-        assert_eq!(ids(&charts), [vec![3], vec![1], vec![2]]);
-    }
-
-    #[test]
-    fn moving_chart_after_another_changes_only_the_requested_order() {
-        let mut charts = layout(&[1, 2, 3]);
-
-        assert!(move_chart_in_layout(
-            &mut charts,
-            1,
-            2,
-            ChartDropPosition::Below
-        ));
-        assert_eq!(ids(&charts), [vec![2], vec![1], vec![3]]);
-    }
-
-    #[test]
-    fn dropping_to_the_right_places_charts_in_the_same_row() {
-        let mut charts = layout(&[1, 2]);
-
-        assert!(move_chart_in_layout(
-            &mut charts,
-            2,
-            1,
-            ChartDropPosition::Right
-        ));
-        assert_eq!(ids(&charts), [vec![1, 2]]);
-    }
-
-    #[test]
-    fn dropping_to_the_left_places_charts_in_the_same_row() {
-        let mut charts = layout(&[1, 2]);
-
-        assert!(move_chart_in_layout(
-            &mut charts,
-            2,
-            1,
-            ChartDropPosition::Left
-        ));
-        assert_eq!(ids(&charts), [vec![2, 1]]);
-    }
-
-    #[test]
-    fn dropping_in_the_existing_position_is_a_no_op() {
-        let mut charts = layout(&[1, 2, 3]);
-
-        assert!(!move_chart_in_layout(
-            &mut charts,
-            2,
-            3,
-            ChartDropPosition::Above
-        ));
-        assert_eq!(ids(&charts), [vec![1], vec![2], vec![3]]);
-    }
-
-    #[test]
-    fn reordering_one_tab_does_not_change_another_tabs_layout() {
-        let mut first_tab_charts = layout(&[1, 2, 3]);
-        let second_tab_charts = layout(&[4, 5, 6]);
-
-        assert!(move_chart_in_layout(
-            &mut first_tab_charts,
-            3,
-            1,
-            ChartDropPosition::Right
-        ));
-        assert_eq!(ids(&first_tab_charts), [vec![1, 3], vec![2]]);
-        assert_eq!(ids(&second_tab_charts), [vec![4], vec![5], vec![6]]);
+        for index in 0..4 {
+            let (position, size, _) = chart_window_geometry(area, index, 4);
+            let window = Rect::from_min_size(position, size);
+            assert!(area.contains_rect(window));
+        }
     }
 
     #[test]
@@ -809,22 +649,8 @@ mod tests {
         add_chart_to_layout(&mut first_tab_charts, Chart::new(5, ChartKind::Volume));
         assert!(remove_chart_from_layout(&mut first_tab_charts, 1));
 
-        assert_eq!(ids(&first_tab_charts), [vec![2], vec![5]]);
-        assert_eq!(ids(&second_tab_charts), [vec![3], vec![4]]);
-    }
-
-    #[test]
-    fn removing_a_chart_from_a_horizontal_row_keeps_the_other_chart() {
-        let mut charts = vec![
-            vec![
-                Chart::new(1, ChartKind::Price),
-                Chart::new(2, ChartKind::Volume),
-            ],
-            vec![Chart::new(3, ChartKind::Price)],
-        ];
-
-        assert!(remove_chart_from_layout(&mut charts, 2));
-        assert_eq!(ids(&charts), [vec![1], vec![3]]);
+        assert_eq!(ids(&first_tab_charts), [2, 5]);
+        assert_eq!(ids(&second_tab_charts), [3, 4]);
     }
 
     #[test]
@@ -832,6 +658,6 @@ mod tests {
         let mut charts = layout(&[1]);
 
         assert!(!remove_chart_from_layout(&mut charts, 1));
-        assert_eq!(ids(&charts), [vec![1]]);
+        assert_eq!(ids(&charts), [1]);
     }
 }

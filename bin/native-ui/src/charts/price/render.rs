@@ -34,7 +34,7 @@ pub fn show(
     let x_link = egui::Id::NULL.with(("ohlcv-time-axis", feed_id));
 
     Plot::new(("ohlcv-price", feed_id, chart_id))
-        .height(410.0)
+        .height(ui.available_height().max(120.0))
         .default_x_bounds(x_min, x_max)
         .default_y_bounds(min_price - price_padding, max_price + price_padding)
         .link_axis(x_link, egui::Vec2b::new(true, false))
