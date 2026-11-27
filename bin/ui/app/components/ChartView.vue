@@ -2,6 +2,12 @@
 import { onBeforeUnmount, onMounted, ref, computed, reactive, nextTick, watch } from 'vue'
 import { createChart } from '~/packages/open-charts/src'
 import type { AnyChartSeries, ChartEngine } from '~/packages/open-charts/src/core/types'
+import {
+  DEFAULT_CHART_ORDER,
+  normalizeChartOrder,
+  useChartLayoutStore,
+  type ChartId
+} from '~/stores/chartLayout'
 import type { Bar } from '~/utils/bar'
 import { createOhlcvSeries } from '~/utils/ohlcvSeries'
 import {
@@ -89,6 +95,20 @@ const chartHost = ref<HTMLElement | null>(null)
 const momentumChartHost = ref<HTMLElement | null>(null)
 const deltaChartHost = ref<HTMLElement | null>(null)
 const bidAskFlowChartHost = ref<HTMLElement | null>(null)
+const chartLayoutStore = useChartLayoutStore()
+const chartOrder = ref<ChartId[]>([...DEFAULT_CHART_ORDER])
+const chartHostRefCallbacks: Record<ChartId, (element: unknown) => void> = {
+  ohlcv: (element) => { chartHost.value = element as HTMLElement | null },
+  momentum: (element) => { momentumChartHost.value = element as HTMLElement | null },
+  delta: (element) => { deltaChartHost.value = element as HTMLElement | null },
+  bidAskFlow: (element) => { bidAskFlowChartHost.value = element as HTMLElement | null }
+}
+const chartLabels: Record<ChartId, string> = {
+  ohlcv: 'OHLCV',
+  momentum: 'MOMENTUM ALCISTA/BAJISTA',
+  delta: 'VELAS DE DELTA',
+  bidAskFlow: 'FLUJO BID/ASK ACUMULADO'
+}
 const activeTab = ref<'charts' | 'settings'>('charts')
 const source = ref<MarketSource>('binance')
 const symbol = ref('BTCUSDT')
@@ -128,6 +148,26 @@ const canApply = computed(() => {
     || draftTimeframe.value !== timeframe.value
   )
 })
+
+function moveChart(chartId: ChartId, direction: -1 | 1) {
+  const currentIndex = chartOrder.value.indexOf(chartId)
+  const targetIndex = currentIndex + direction
+
+  if (targetIndex < 0 || targetIndex >= chartOrder.value.length) {
+    return
+  }
+
+  const reorderedCharts = [...chartOrder.value]
+  const [movedChart] = reorderedCharts.splice(currentIndex, 1)
+
+  if (!movedChart) {
+    return
+  }
+
+  reorderedCharts.splice(targetIndex, 0, movedChart)
+  chartOrder.value = reorderedCharts
+  chartLayoutStore.setChartOrder(reorderedCharts)
+}
 
 watch(activeTab, async (tab) => {
   const chartEngines = [chart, momentumChart, deltaChart, bidAskFlowChart]
@@ -1165,6 +1205,11 @@ function selectDeltaProfileWindow() {
 }
 
 onMounted(async () => {
+  const savedChartOrder = normalizeChartOrder(chartLayoutStore.chartOrder)
+  chartOrder.value = savedChartOrder
+  chartLayoutStore.setChartOrder(savedChartOrder)
+  await nextTick()
+
   if (!chartHost.value) {
     return
   }
@@ -1885,132 +1930,150 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div class="relative box-border h-[clamp(420px,65vh,720px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
-        <div
-          id="ohlcv-chart"
-          ref="chartHost"
-          class="h-full w-full"
-          aria-label="Gráfico de velas OHLCV"
-        />
-        <div
-          v-if="isLoading && barCount === 0"
-          class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/70 text-sm text-muted"
-          role="status"
+      <div class="flex flex-col gap-4">
+        <section
+          v-for="(chartId, index) in chartOrder"
+          :key="chartId"
+          class="flex flex-col gap-3"
+          :aria-labelledby="`${chartId}-chart-title`"
         >
-          Cargando histórico de {{ symbol }}…
-        </div>
-        <div
-          v-else-if="!isLoading && barCount === 0"
-          class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-sm text-muted"
-        >
-          No hay barras históricas para mostrar.
-        </div>
+          <header class="flex items-start justify-between gap-3">
+            <div>
+              <h2
+                :id="`${chartId}-chart-title`"
+                class="text-base font-semibold text-highlighted"
+              >
+                {{ chartLabels[chartId] }}
+              </h2>
+              <p
+                v-if="chartId === 'momentum'"
+                class="mt-1 text-xs text-muted"
+              >
+                Flujo y eficiencia del precio ponderados por intensidad · línea alcista continua · bajista discontinua · marcas naranjas = integridad dudosa
+              </p>
+              <p
+                v-else-if="chartId === 'delta'"
+                class="mt-1 text-xs text-muted"
+              >
+                Unidad qty · solo cantidades de raw_ticks · {{ deltaCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
+              </p>
+              <p
+                v-else-if="chartId === 'bidAskFlow'"
+                class="mt-1 text-xs text-muted"
+              >
+                Unidad qty · OHLC acumulado desde la primera barra cargada (base 0) · solo raw_ticks · {{ bidAskFlowCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
+              </p>
+            </div>
+
+            <div
+              class="flex shrink-0 items-center gap-1"
+              role="group"
+              :aria-label="`Controles de posición para ${chartLabels[chartId]}`"
+            >
+              <button
+                type="button"
+                class="size-9 rounded-md border border-default bg-elevated/30 text-highlighted transition-colors hover:bg-elevated/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-40"
+                :aria-label="`Mover ${chartLabels[chartId]} hacia arriba`"
+                :disabled="index === 0"
+                @click="moveChart(chartId, -1)"
+              >
+                <span aria-hidden="true">↑</span>
+              </button>
+              <button
+                type="button"
+                class="size-9 rounded-md border border-default bg-elevated/30 text-highlighted transition-colors hover:bg-elevated/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-40"
+                :aria-label="`Mover ${chartLabels[chartId]} hacia abajo`"
+                :disabled="index === chartOrder.length - 1"
+                @click="moveChart(chartId, 1)"
+              >
+                <span aria-hidden="true">↓</span>
+              </button>
+            </div>
+          </header>
+
+          <div
+            v-if="chartId === 'ohlcv'"
+            class="relative box-border h-[clamp(420px,65vh,720px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30"
+          >
+            <div
+              id="ohlcv-chart"
+              :ref="chartHostRefCallbacks.ohlcv"
+              class="h-full w-full"
+              aria-label="Gráfico de velas OHLCV"
+            />
+            <div
+              v-if="isLoading && barCount === 0"
+              class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/70 text-sm text-muted"
+              role="status"
+            >
+              Cargando histórico de {{ symbol }}…
+            </div>
+            <div
+              v-else-if="!isLoading && barCount === 0"
+              class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-sm text-muted"
+            >
+              No hay barras históricas para mostrar.
+            </div>
+          </div>
+
+          <div
+            v-else-if="chartId === 'momentum'"
+            class="relative box-border h-[clamp(220px,30vh,320px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30"
+          >
+            <div
+              id="momentum-chart"
+              :ref="chartHostRefCallbacks.momentum"
+              class="h-full w-full"
+              aria-label="Indicador de momentum alcista y bajista"
+            />
+            <div
+              v-if="momentumPointCount === 0"
+              class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
+              role="status"
+            >
+              El indicador necesita datos microestructurales válidos y {{ momentumSettings.warmup + 1 }} barras para mostrar las líneas.
+            </div>
+          </div>
+
+          <div
+            v-else-if="chartId === 'delta'"
+            class="relative box-border h-[clamp(260px,35vh,380px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30"
+          >
+            <div
+              id="delta-chart"
+              :ref="chartHostRefCallbacks.delta"
+              class="h-full w-full"
+              aria-label="Gráfico de velas de delta"
+            />
+            <div
+              v-if="deltaCandleCount === 0"
+              class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
+              role="status"
+            >
+              Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
+            </div>
+          </div>
+
+          <div
+            v-else
+            class="relative box-border h-[clamp(260px,35vh,380px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30"
+          >
+            <div
+              id="bid-ask-flow-chart"
+              :ref="chartHostRefCallbacks.bidAskFlow"
+              class="h-full w-full"
+              aria-label="Gráfico OHLC de flujo bid/ask acumulado en cantidades"
+            />
+            <div
+              v-if="bidAskFlowCandleCount === 0"
+              class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
+              role="status"
+            >
+              Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
+            </div>
+          </div>
+        </section>
       </div>
-
-      <section
-        class="flex flex-col gap-3"
-        aria-labelledby="momentum-chart-title"
-      >
-        <header>
-          <div>
-            <h2
-              id="momentum-chart-title"
-              class="text-base font-semibold text-highlighted"
-            >
-              MOMENTUM ALCISTA/BAJISTA
-            </h2>
-            <p class="mt-1 text-xs text-muted">
-              Flujo y eficiencia del precio ponderados por intensidad · línea alcista continua · bajista discontinua · marcas naranjas = integridad dudosa
-            </p>
-          </div>
-        </header>
-
-        <div class="relative box-border h-[clamp(220px,30vh,320px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
-          <div
-            id="momentum-chart"
-            ref="momentumChartHost"
-            class="h-full w-full"
-            aria-label="Indicador de momentum alcista y bajista"
-          />
-          <div
-            v-if="momentumPointCount === 0"
-            class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
-            role="status"
-          >
-            El indicador necesita datos microestructurales válidos y {{ momentumSettings.warmup + 1 }} barras para mostrar las líneas.
-          </div>
-        </div>
-      </section>
-
-      <section
-        class="flex flex-col gap-3"
-        aria-labelledby="delta-chart-title"
-      >
-        <header>
-          <div>
-            <h2
-              id="delta-chart-title"
-              class="text-base font-semibold text-highlighted"
-            >
-              VELAS DE DELTA
-            </h2>
-            <p class="mt-1 text-xs text-muted">
-              Unidad qty · solo cantidades de raw_ticks · {{ deltaCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
-            </p>
-          </div>
-        </header>
-
-        <div class="relative box-border h-[clamp(260px,35vh,380px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
-          <div
-            id="delta-chart"
-            ref="deltaChartHost"
-            class="h-full w-full"
-            aria-label="Gráfico de velas de delta"
-          />
-          <div
-            v-if="deltaCandleCount === 0"
-            class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
-            role="status"
-          >
-            Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
-          </div>
-        </div>
-      </section>
-
-      <section
-        class="flex flex-col gap-3"
-        aria-labelledby="bid-ask-flow-title"
-      >
-        <header>
-          <div>
-            <h2
-              id="bid-ask-flow-title"
-              class="text-base font-semibold text-highlighted"
-            >
-              FLUJO BID/ASK ACUMULADO
-            </h2>
-            <p class="mt-1 text-xs text-muted">
-              Unidad qty · OHLC acumulado desde la primera barra cargada (base 0) · solo raw_ticks · {{ bidAskFlowCandleCount }} / {{ DELTA_HISTORY_LIMIT }} Bars
-            </p>
-          </div>
-        </header>
-
-        <div class="relative box-border h-[clamp(260px,35vh,380px)] w-full flex-none overflow-hidden rounded-xl border border-default bg-elevated/30">
-          <div
-            id="bid-ask-flow-chart"
-            ref="bidAskFlowChartHost"
-            class="h-full w-full"
-            aria-label="Gráfico OHLC de flujo bid/ask acumulado en cantidades"
-          />
-          <div
-            v-if="bidAskFlowCandleCount === 0"
-            class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-default/50 px-4 text-center text-sm text-muted"
-            role="status"
-          >
-            Esperando Bars con cantidades válidas en raw_ticks de {{ symbol }}…
-          </div>
-        </div>
-      </section>
     </div>
   </section>
 </template>

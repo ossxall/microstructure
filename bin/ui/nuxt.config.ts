@@ -3,14 +3,15 @@ export default defineNuxtConfig({
   modules: [
     '@nuxt/eslint',
     '@nuxt/ui',
-    '@pinia/nuxt'
+    '@pinia/nuxt',
+    'pinia-plugin-persistedstate/nuxt'
   ],
 
   devtools: {
     enabled: true
   },
 
-  css: ['~/assets/css/main.css', "~/packages/open-charts/playground/chart.css"],
+  css: ['~/assets/css/main.css', '~/packages/open-charts/playground/chart.css'],
 
   ui: {
     eslint: {
