@@ -23,6 +23,7 @@ const MIN_QUESTDB_MAX_BUF_SIZE_BYTES: usize = 32 * 1024 * 1024;
 const MIN_QUESTDB_SF_MAX_SEGMENT_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_QUESTDB_MAX_BUF_SIZE_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_QUESTDB_SF_MAX_SEGMENT_BYTES: u64 = 128 * 1024 * 1024;
+const DEFAULT_BAR_STORE_SEGMENT_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_LIVE_POLL_INTERVAL_MS: u64 = 1_000;
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,8 @@ pub struct Config {
     pub questdb_sf_dir: PathBuf,
     pub questdb_max_buf_size_bytes: usize,
     pub questdb_sf_max_segment_bytes: u64,
+    pub bar_store_dir: PathBuf,
+    pub bar_store_segment_bytes: u64,
     pub id_registry_path: PathBuf,
     pub poll_interval_seconds: u64,
     pub live_poll_interval_ms: u64,
@@ -61,6 +64,10 @@ impl Config {
             resolve_path("QUESTDB_SF_DIR", "./data/questdb-sf"),
             &timeframe,
         );
+        let bar_store_dir = timeframe_path(
+            resolve_path("AGGREGATOR_BAR_STORE_DIR", "./data/bars"),
+            &timeframe,
+        );
         let config = Self {
             pulsar_url: read("PULSAR_URL", "pulsar://localhost:6650"),
             pulsar_namespace: read("PULSAR_NAMESPACE", "persistent://public/default"),
@@ -75,6 +82,11 @@ impl Config {
             questdb_sf_max_segment_bytes: read_parse(
                 "QUESTDB_SF_MAX_SEGMENT_BYTES",
                 DEFAULT_QUESTDB_SF_MAX_SEGMENT_BYTES,
+            )?,
+            bar_store_dir,
+            bar_store_segment_bytes: read_parse(
+                "AGGREGATOR_BAR_SEGMENT_BYTES",
+                DEFAULT_BAR_STORE_SEGMENT_BYTES,
             )?,
             id_registry_path: resolve_path("AGGREGATOR_ID_REGISTRY", "./data/ids.json"),
             poll_interval_seconds: read_parse("POLL_INTERVAL_SECONDS", 60)?,
@@ -120,6 +132,12 @@ impl Config {
         );
         if config.id_registry_path.as_os_str().is_empty() {
             bail!("AGGREGATOR_ID_REGISTRY cannot be empty");
+        }
+        if config.bar_store_dir.as_os_str().is_empty() {
+            bail!("AGGREGATOR_BAR_STORE_DIR cannot be empty");
+        }
+        if config.bar_store_segment_bytes == 0 {
+            bail!("AGGREGATOR_BAR_SEGMENT_BYTES must be greater than zero");
         }
         if config.id_registry_path.to_string_lossy().contains(';') {
             bail!("AGGREGATOR_ID_REGISTRY cannot contain semicolons");
@@ -232,6 +250,10 @@ mod tests {
         assert_eq!(
             timeframe_path(store_and_forward, "5m"),
             PathBuf::from("/data/questdb-sf-5m")
+        );
+        assert_eq!(
+            timeframe_path(PathBuf::from("/data/bars"), "5m"),
+            PathBuf::from("/data/bars-5m")
         );
     }
 

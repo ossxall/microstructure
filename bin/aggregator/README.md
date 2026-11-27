@@ -75,6 +75,16 @@ precedence. The shared `ticks` table must be populated by the merger. Set
 - Each timeframe has separate bars, outbox, cursor, ID registry, and
   store-and-forward paths. The `1m` worker retains the existing table and
   registry paths for compatibility; other workers use timeframe-suffixed names.
+- Finalized Bars are also stored in the aggregator's append-only rkyv store.
+  Records are CRC-checked, 16-byte aligned, and held in segmented files;
+  `index.json` is atomically checkpointed and any uncheckpointed tail is scanned
+  on startup. Replacements append a new record instead of changing mapped
+  bytes. The in-memory sorted index supports `write`, `upsert`, `read`,
+  `read_last_n`, and a validated zero-copy archived view. A Bar is written to
+  this store before its QuestDB row; unchanged bars encountered during the
+  normal reprocessing window are added if missing. QuestDB remains the source
+  for tick queries, processing cursors, finalized-bar compatibility, and the
+  durable Pulsar outbox.
 - Bars use `(time, source, symbol)` as the UPSERT key within their timeframe
   table. If a late tick falls within the rescan window, the aggregator
   recomputes the affected bar, increments its revision, upserts it, and emits a
@@ -171,6 +181,8 @@ and do not share it between active instances for the same timeframe.
 | `AGGREGATOR_TIMEFRAME` | `1m` | Timeframe this worker owns; the sample `.env.example` sets `5m` |
 | `QUESTDB_CONNECT` | `ws::addr=localhost:9000` | QuestDB QWP connection |
 | `QUESTDB_SF_DIR` | `./data/questdb-sf` | Persistent QuestDB client store-and-forward directory |
+| `AGGREGATOR_BAR_STORE_DIR` | `./data/bars` | Append-only rkyv Bar segments and mmap index; isolated by timeframe |
+| `AGGREGATOR_BAR_SEGMENT_BYTES` | `268435456` | Target maximum segment size; an individual Bar can be up to 64 MiB |
 | `QUESTDB_MAX_BUF_SIZE_BYTES` | `134217728` | Maximum encoded QuestDB client buffer size; must be at least 32 MiB and no smaller than the segment size |
 | `QUESTDB_SF_MAX_SEGMENT_BYTES` | `134217728` | QuestDB store-and-forward segment size; must be at least 32 MiB |
 | `POLL_INTERVAL_SECONDS` | `60` | Aggregator polling cadence |

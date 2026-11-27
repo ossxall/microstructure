@@ -14,16 +14,17 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 mod config;
-mod model;
 #[path = "../../shared/payload_codec.rs"]
 mod payload_codec;
 mod persistence;
 mod registry;
 
+use aggregator::bar_store::BarStore;
+use aggregator::model;
+use aggregator::model::{Bar, Tick, build_bar_for_timeframe};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use config::Config;
-use model::{Bar, Tick, build_bar_for_timeframe};
 use persistence::{BarEvent, PendingEvent};
 use pulsar::{Pulsar, TokioExecutor, producer::Producer};
 use questdb::QuestDb;
@@ -50,6 +51,15 @@ async fn main() -> Result<()> {
     })?;
     let mut ids =
         IdRegistry::load_for_timeframe(config.id_registry_path.clone(), &config.timeframe)?;
+    let bar_store = Arc::new(BarStore::open(
+        config.bar_store_dir.clone(),
+        config.bar_store_segment_bytes,
+    )?);
+    info!(
+        directory = %config.bar_store_dir.display(),
+        bars = bar_store.len(),
+        "Opened mmap Bar store"
+    );
     let questdb = connect_questdb(&config).await?;
     let pulsar = Pulsar::builder(&config.pulsar_url, TokioExecutor)
         .build()
@@ -85,6 +95,7 @@ async fn main() -> Result<()> {
         &mut producers,
         &mut ids,
         &mut next_bucket_ms,
+        Arc::clone(&bar_store),
     )
     .await
     {
@@ -119,6 +130,7 @@ async fn main() -> Result<()> {
                     &mut producers,
                     &mut ids,
                     &mut next_bucket_ms,
+                    Arc::clone(&bar_store),
                 ).await {
                     error!(
                     error = %format!("{error:#}"),
@@ -155,6 +167,10 @@ async fn main() -> Result<()> {
             .await
             .context("Failed to close Pulsar producer")?;
     }
+    let bar_store = Arc::clone(&bar_store);
+    tokio::task::spawn_blocking(move || bar_store.flush())
+        .await
+        .context("Bar store checkpoint task failed")??;
     Ok(())
 }
 
@@ -235,6 +251,7 @@ async fn run_cycle(
     producers: &mut BTreeMap<String, Producer<TokioExecutor>>,
     ids: &mut IdRegistry,
     next_bucket_ms: &mut Option<u64>,
+    bar_store: Arc<BarStore>,
 ) -> Result<()> {
     dispatch_pending_events(
         Arc::clone(&db),
@@ -288,6 +305,7 @@ async fn run_cycle(
             interval_ms,
             ids,
             bucket_ms,
+            Arc::clone(&bar_store),
         )
         .await?;
         dispatch_pending_events(
@@ -439,6 +457,7 @@ async fn process_bucket(
     timeframe_ms: u64,
     ids: &mut IdRegistry,
     bucket_start_ms: u64,
+    bar_store: Arc<BarStore>,
 ) -> Result<()> {
     let start_us = i64::try_from(
         bucket_start_ms
@@ -520,13 +539,22 @@ async fn process_bucket(
             .await
             .context("QuestDB outbox lookup task failed")??
         };
+        if changed {
+            persist_bar(
+                Arc::clone(&db),
+                Arc::clone(&bar_store),
+                timeframe,
+                &bar,
+                &event_id,
+            )
+            .await?;
+        } else {
+            ensure_bar_store(Arc::clone(&bar_store), &bar).await?;
+        }
         if !changed && event_exists {
             continue;
         }
 
-        if changed {
-            persist_bar(Arc::clone(&db), timeframe, &bar, &event_id).await?;
-        }
         persist_event(Arc::clone(&db), timeframe, &bar, &event_id).await?;
         info!(
             source = %bar.source,
@@ -541,14 +569,38 @@ async fn process_bucket(
     Ok(())
 }
 
-async fn persist_bar(db: Arc<QuestDb>, timeframe: &str, bar: &Bar, event_id: &str) -> Result<()> {
+async fn persist_bar(
+    db: Arc<QuestDb>,
+    bar_store: Arc<BarStore>,
+    timeframe: &str,
+    bar: &Bar,
+    event_id: &str,
+) -> Result<()> {
     let db = Arc::clone(&db);
+    let bar_store = Arc::clone(&bar_store);
     let bar = bar.clone();
     let event_id = event_id.to_string();
     let timeframe = timeframe.to_string();
-    tokio::task::spawn_blocking(move || persistence::persist_bar(&db, &timeframe, &bar, &event_id))
-        .await
-        .context("QuestDB bar persistence task failed")??;
+    tokio::task::spawn_blocking(move || {
+        bar_store.upsert(&bar)?;
+        persistence::persist_bar(&db, &timeframe, &bar, &event_id)
+    })
+    .await
+    .context("Bar persistence task failed")??;
+    Ok(())
+}
+
+async fn ensure_bar_store(bar_store: Arc<BarStore>, bar: &Bar) -> Result<()> {
+    let bar_store = Arc::clone(&bar_store);
+    let bar = bar.clone();
+    tokio::task::spawn_blocking(move || {
+        if !bar_store.contains_bar(&bar)? {
+            bar_store.upsert(&bar)?;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("Bar store repair task failed")??;
     Ok(())
 }
 
@@ -720,7 +772,7 @@ fn bar_topic_name(namespace: &str, source: &str, symbol: &str, timeframe: &str) 
 mod tests {
     use super::{bar_topic_name, live_event_id, questdb_connect_string};
     use crate::config::Config;
-    use crate::model::{Tick, build_bar_for_timeframe};
+    use aggregator::model::{Tick, build_bar_for_timeframe};
     use std::path::PathBuf;
 
     #[test]
@@ -734,6 +786,8 @@ mod tests {
             questdb_sf_dir: PathBuf::from("/tmp/aggregator-sf"),
             questdb_max_buf_size_bytes: 128 * 1024 * 1024,
             questdb_sf_max_segment_bytes: 128 * 1024 * 1024,
+            bar_store_dir: PathBuf::from("/tmp/aggregator-bars"),
+            bar_store_segment_bytes: 256 * 1024 * 1024,
             id_registry_path: PathBuf::from("/tmp/aggregator-ids.json"),
             poll_interval_seconds: 60,
             live_poll_interval_ms: 1_000,

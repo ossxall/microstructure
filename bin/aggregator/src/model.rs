@@ -24,18 +24,18 @@ pub const PRICE_SCALE: u8 = 8;
 pub const QUANTITY_SCALE: u8 = 8;
 pub const TIME_UNIT_MILLISECONDS: u8 = 1;
 
-pub(crate) mod decimal_string {
+pub mod decimal_string {
     use serde::{Serialize, Serializer};
     use std::fmt::Display;
 
-    pub(crate) fn serialize<T: Display, S: Serializer>(
+    pub fn serialize<T: Display, S: Serializer>(
         value: &T,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&value.to_string())
     }
 
-    pub(crate) fn serialize_vec<T: Display, S: Serializer>(
+    pub fn serialize_vec<T: Display, S: Serializer>(
         values: &[T],
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
@@ -82,7 +82,8 @@ impl Tick {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct Bar {
     pub schema_version: u16,
     #[serde(serialize_with = "decimal_string::serialize")]
@@ -109,7 +110,8 @@ pub struct Bar {
     pub raw_ticks: Vec<RawTick>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct Header {
     pub schema_version: u16,
     #[serde(serialize_with = "decimal_string::serialize")]
@@ -123,7 +125,8 @@ pub struct Header {
     pub time_unit: u8,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct Identity {
     #[serde(serialize_with = "decimal_string::serialize")]
     pub first_trade_id: u64,
@@ -146,7 +149,8 @@ pub struct Identity {
     pub sequence_contiguous: u8,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct Price {
     #[serde(serialize_with = "decimal_string::serialize")]
     pub open: i64,
@@ -174,7 +178,8 @@ pub struct Price {
     pub min_price_change: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct VolumeFlow {
     #[serde(serialize_with = "decimal_string::serialize")]
     pub total_qty: u128,
@@ -204,7 +209,8 @@ pub struct VolumeFlow {
     pub vwap: u128,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct Footprint {
     pub level_count: u32,
     #[serde(serialize_with = "decimal_string::serialize")]
@@ -229,7 +235,8 @@ pub struct Footprint {
     pub levels: Vec<FootprintLevel>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct FootprintLevel {
     #[serde(serialize_with = "decimal_string::serialize")]
     pub price: i64,
@@ -251,7 +258,8 @@ pub struct FootprintLevel {
     pub flags: u16,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct PriceChanges {
     #[serde(serialize_with = "decimal_string::serialize")]
     pub change_count: u64,
@@ -276,7 +284,8 @@ pub struct PriceChanges {
     pub min_change: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct TradeSizeStatistics {
     #[serde(serialize_with = "decimal_string::serialize")]
     pub size_sum: u128,
@@ -291,7 +300,8 @@ pub struct TradeSizeStatistics {
     pub mean_size: u128,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct Timing {
     #[serde(serialize_with = "decimal_string::serialize")]
     pub first_interarrival: u64,
@@ -311,7 +321,8 @@ pub struct Timing {
     pub activity_profile: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct Distributions {
     #[serde(serialize_with = "decimal_string::serialize_vec")]
     pub trade_size_hist: Vec<u64>,
@@ -339,7 +350,8 @@ pub struct Distributions {
     pub price_volume_hist_max: i128,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct Microstructure {
     #[serde(serialize_with = "decimal_string::serialize")]
     pub trade_imbalance: i128,
@@ -367,7 +379,8 @@ pub struct Microstructure {
     pub exhaustion_sell: u128,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct Integrity {
     #[serde(serialize_with = "decimal_string::serialize")]
     pub sequence_gaps: u64,
@@ -388,7 +401,8 @@ pub struct Integrity {
     pub checksum: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub struct RawTick {
     #[serde(serialize_with = "decimal_string::serialize")]
     pub time: u64,
