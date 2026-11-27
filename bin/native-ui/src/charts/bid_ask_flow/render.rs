@@ -32,10 +32,6 @@ pub fn show(
         show_waiting(ui);
         return;
     }
-    if indicator_snapshot.source_generation != snapshot.generation {
-        show_waiting(ui);
-        return;
-    }
     let Some(ChartIndicatorData::BidAskFlow(data)) =
         indicator_snapshot.charts.get(&ChartKind::BidAskFlow)
     else {

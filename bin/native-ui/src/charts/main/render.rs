@@ -187,9 +187,11 @@ pub fn show(
             );
         }
 
-        if indicator_snapshot.source_generation == snapshot.generation
-            && let Some(ChartIndicatorData::Main(main_indicators)) =
-                indicator_snapshot.charts.get(&ChartKind::Main)
+        // Keep the last completed indicator snapshot visible while the worker
+        // calculates the newer market generation. Hiding these overlays during
+        // that interval makes the chart flicker on every live update.
+        if let Some(ChartIndicatorData::Main(main_indicators)) =
+            indicator_snapshot.charts.get(&ChartKind::Main)
         {
             for (period, color, source_points) in [
                 (

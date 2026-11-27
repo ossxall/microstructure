@@ -31,10 +31,6 @@ pub fn show(
         return;
     }
 
-    if indicator_snapshot.source_generation != snapshot.generation {
-        show_waiting(ui);
-        return;
-    }
     let Some(ChartIndicatorData::Momentum(indicators)) =
         indicator_snapshot.charts.get(&ChartKind::Momentum)
     else {
