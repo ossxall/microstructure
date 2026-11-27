@@ -1,7 +1,9 @@
 mod app;
 mod app_log;
+mod charts;
 mod market;
 mod network;
+mod theme;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

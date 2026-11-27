@@ -26,12 +26,6 @@ pub struct FeedKey {
     pub timeframe: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChartKind {
-    Price,
-    Volume,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BarFields {
     pub price: bool,
@@ -46,27 +40,6 @@ pub struct ChartDataRequest {
     pub history_limit: u64,
     pub live: bool,
     pub fields: BarFields,
-}
-
-impl ChartDataRequest {
-    pub fn for_chart(kind: ChartKind) -> Self {
-        let fields = match kind {
-            ChartKind::Price => BarFields {
-                price: true,
-                ..Default::default()
-            },
-            ChartKind::Volume => BarFields {
-                volume_flow: true,
-                ..Default::default()
-            },
-        };
-
-        Self {
-            history_limit: DEFAULT_HISTORY_LIMIT,
-            live: true,
-            fields,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]

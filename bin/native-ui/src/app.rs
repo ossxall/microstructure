@@ -4,37 +4,23 @@ use std::sync::{
     mpsc,
 };
 
-use eframe::egui::{self, Color32, RichText, Stroke};
-use egui_plot::{Bar, BarChart, Line, Plot, PlotPoints, Polygon};
+use eframe::egui::{self, Color32, RichText};
 use tokio::sync::watch;
 
 use crate::{
     app_log::{AppLogger, LogLevel, format_elapsed},
+    charts::{self, Chart, ChartKind},
     market::{
-        CalculationWorkerConfig, ChartDataRequest, ChartKind, ChartSnapshot, DEFAULT_HISTORY_LIMIT,
-        FeedKey, FeedStatus, spawn_calculation_worker,
+        CalculationWorkerConfig, ChartDataRequest, ChartSnapshot, DEFAULT_HISTORY_LIMIT, FeedKey,
+        FeedStatus, spawn_calculation_worker,
     },
     network::{NetworkCommand, NetworkRuntime},
+    theme::{self, BACKGROUND, LIME, MUTED, PANEL, TEXT},
 };
-
-const BACKGROUND: Color32 = Color32::BLACK;
-const PANEL: Color32 = Color32::BLACK;
-const LIME: Color32 = Color32::from_rgb(0, 255, 0);
-const LIME_GREEN: Color32 = Color32::from_rgb(50, 205, 50);
-const GRID: Color32 = Color32::from_rgb(119, 136, 153);
-const TEXT: Color32 = Color32::WHITE;
-const MUTED: Color32 = GRID;
-
-struct Chart {
-    id: u64,
-    kind: ChartKind,
-    data_request: ChartDataRequest,
-}
 
 struct ChartTab {
     feed_id: u64,
     key: FeedKey,
-    charts: Vec<Chart>,
     requested_history: u64,
     _calculation_tx: mpsc::Sender<crate::market::CalculationInput>,
     snapshot_rx: watch::Receiver<Arc<ChartSnapshot>>,
@@ -42,6 +28,7 @@ struct ChartTab {
 
 pub struct ChartApp {
     tabs: Vec<ChartTab>,
+    charts: Vec<Chart>,
     active_tab: usize,
     next_feed_id: u64,
     next_chart_id: u64,
@@ -61,16 +48,19 @@ enum TabAction {
 
 impl ChartApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        set_green_dark_theme(&cc.egui_ctx);
+        theme::set_green_dark_theme(&cc.egui_ctx);
         let logger = AppLogger::new(cc.egui_ctx.clone());
         logger.info(None, "Aplicación iniciada");
         let network = NetworkRuntime::new(logger.clone());
+        let charts = charts::default_layout();
+        let next_chart_id = charts.iter().map(|chart| chart.id).max().unwrap_or(0) + 1;
 
         Self {
             tabs: Vec::new(),
+            charts,
             active_tab: 0,
             next_feed_id: 1,
-            next_chart_id: 1,
+            next_chart_id,
             active_feed_id: Arc::new(AtomicU64::new(0)),
             network,
             egui_ctx: cc.egui_ctx.clone(),
@@ -168,16 +158,13 @@ impl ChartApp {
             symbol,
             timeframe,
         };
-        let charts = vec![
-            self.new_chart(ChartKind::Price),
-            self.new_chart(ChartKind::Volume),
-        ];
-        let requested_history = charts
+        let requests = self.chart_requests(DEFAULT_HISTORY_LIMIT);
+        let requested_history = requests
             .iter()
-            .map(|chart| chart.data_request.history_limit)
+            .map(|request| request.history_limit)
             .max()
             .unwrap_or(DEFAULT_HISTORY_LIMIT);
-        let subscribe_live = charts.iter().any(|chart| chart.data_request.live);
+        let subscribe_live = requests.iter().any(|request| request.live);
 
         let (calculation_tx, calculation_rx) = mpsc::channel();
         let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(ChartSnapshot::default()));
@@ -190,10 +177,6 @@ impl ChartApp {
             calculation_tx: calculation_tx.clone(),
         });
 
-        let requests = charts
-            .iter()
-            .map(|chart| chart.data_request.clone())
-            .collect();
         spawn_calculation_worker(CalculationWorkerConfig {
             feed_id,
             requests,
@@ -213,7 +196,6 @@ impl ChartApp {
         self.tabs.push(ChartTab {
             feed_id,
             key,
-            charts,
             requested_history,
             _calculation_tx: calculation_tx,
             snapshot_rx,
@@ -224,10 +206,22 @@ impl ChartApp {
     fn new_chart(&mut self, kind: ChartKind) -> Chart {
         let id = self.next_chart_id;
         self.next_chart_id += 1;
-        Chart {
-            id,
-            kind,
-            data_request: ChartDataRequest::for_chart(kind),
+        Chart::new(id, kind)
+    }
+
+    fn chart_requests(&self, history_limit: u64) -> Vec<ChartDataRequest> {
+        self.charts
+            .iter()
+            .map(|chart| chart.data_request(history_limit))
+            .collect()
+    }
+
+    fn update_chart_requests(&self) {
+        for tab in &self.tabs {
+            let requests = self.chart_requests(tab.requested_history);
+            let _ = tab
+                ._calculation_tx
+                .send(crate::market::CalculationInput::ChartRequests(requests));
         }
     }
 
@@ -269,25 +263,16 @@ impl ChartApp {
     }
 
     fn add_chart(&mut self, kind: ChartKind) {
-        let mut chart = self.new_chart(kind);
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        if self.tabs.is_empty() {
             return;
-        };
-        chart.data_request.history_limit = tab.requested_history;
-        tab.charts.push(chart);
-        let chart_kind = tab.charts.last().map(|chart| chart.kind);
+        }
+        let chart = self.new_chart(kind);
+        self.charts.push(chart);
+        self.update_chart_requests();
         self.logger.info(
-            Some(feed_label(&tab.key)),
-            format!("Chart añadido: {chart_kind:?}"),
+            None,
+            format!("Chart añadido a todas las pestañas: {kind:?}"),
         );
-        let requests = tab
-            .charts
-            .iter()
-            .map(|chart| chart.data_request.clone())
-            .collect();
-        let _ = tab
-            ._calculation_tx
-            .send(crate::market::CalculationInput::ChartRequests(requests));
     }
 
     fn load_more_history(&mut self) {
@@ -309,25 +294,19 @@ impl ChartApp {
     }
 
     fn remove_chart(&mut self, chart_id: u64) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
-            return;
-        };
-        if tab.charts.len() <= 1 {
+        if self.charts.len() <= 1 {
             return;
         }
-        tab.charts.retain(|chart| chart.id != chart_id);
+        let old_len = self.charts.len();
+        self.charts.retain(|chart| chart.id != chart_id);
+        if self.charts.len() == old_len {
+            return;
+        }
+        self.update_chart_requests();
         self.logger.info(
-            Some(feed_label(&tab.key)),
-            "Chart cerrado; actualizando necesidades de cálculo",
+            None,
+            "Chart cerrado en todas las pestañas; cálculo actualizado",
         );
-        let requests = tab
-            .charts
-            .iter()
-            .map(|chart| chart.data_request.clone())
-            .collect();
-        let _ = tab
-            ._calculation_tx
-            .send(crate::market::CalculationInput::ChartRequests(requests));
     }
 
     fn show_log_window(&mut self, ctx: &egui::Context) {
@@ -387,7 +366,12 @@ impl ChartApp {
         logger.set_dialog_open(self.logs_open);
     }
 
-    fn show_tab_content(ui: &mut egui::Ui, tab: &ChartTab, action: &mut Option<TabAction>) {
+    fn show_tab_content(
+        ui: &mut egui::Ui,
+        tab: &ChartTab,
+        chart_layout: &[Chart],
+        action: &mut Option<TabAction>,
+    ) {
         let snapshot = tab.snapshot_rx.borrow().clone();
         let last = snapshot.full_bars.last().map(|bar| bar.candle);
         let precision = if tab.key.symbol == "ADAUSDT" { 4 } else { 2 };
@@ -470,11 +454,10 @@ impl ChartApp {
 
         ui.horizontal(|ui| {
             ui.menu_button("Añadir Chart", |ui| {
-                if ui.button("Precio").clicked() {
-                    *action = Some(TabAction::AddChart(ChartKind::Price));
-                }
-                if ui.button("Volumen").clicked() {
-                    *action = Some(TabAction::AddChart(ChartKind::Volume));
+                for kind in ChartKind::ALL {
+                    if ui.button(kind.menu_label()).clicked() {
+                        *action = Some(TabAction::AddChart(kind));
+                    }
                 }
             });
             if ui.button("Cargar 50 Bars más").clicked() {
@@ -484,44 +467,17 @@ impl ChartApp {
 
         ui.separator();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for chart in &tab.charts {
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .corner_radius(egui::CornerRadius::same(5))
-                    .inner_margin(egui::Margin::same(6))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let title = match chart.kind {
-                                ChartKind::Price => "PRECIO · OHLC",
-                                ChartKind::Volume => "VOLUMEN · total_qty",
-                            };
-                            ui.label(RichText::new(title).color(MUTED).small().strong());
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .add_enabled(
-                                            tab.charts.len() > 1,
-                                            egui::Button::new("×").small(),
-                                        )
-                                        .on_hover_text("Cerrar Chart")
-                                        .clicked()
-                                    {
-                                        *action = Some(TabAction::RemoveChart(chart.id));
-                                    }
-                                },
-                            );
-                        });
-                        match chart.kind {
-                            ChartKind::Price => {
-                                Self::show_price_chart(ui, tab, chart, &snapshot);
-                            }
-                            ChartKind::Volume => {
-                                Self::show_volume_chart(ui, tab, chart, &snapshot);
-                            }
-                        }
-                    });
-                ui.add_space(8.0);
+            for chart in chart_layout.iter().copied() {
+                if charts::show(
+                    ui,
+                    chart,
+                    tab.feed_id,
+                    &tab.key.timeframe,
+                    &snapshot,
+                    chart_layout.len() > 1,
+                ) {
+                    *action = Some(TabAction::RemoveChart(chart.id));
+                }
             }
         });
 
@@ -539,134 +495,6 @@ impl ChartApp {
             });
         });
     }
-
-    fn show_price_chart(
-        ui: &mut egui::Ui,
-        tab: &ChartTab,
-        chart: &Chart,
-        snapshot: &ChartSnapshot,
-    ) {
-        // All Charts in this tab observe the same immutable snapshot. Charts
-        // needing non-OHLCV attributes can read `snapshot.full_bars`.
-        let bars = &snapshot.full_bars;
-        if bars.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("Esperando history/live…").color(MUTED));
-            });
-            return;
-        }
-
-        let min_price = bars
-            .iter()
-            .map(|bar| bar.candle.low)
-            .fold(f64::INFINITY, f64::min);
-        let max_price = bars
-            .iter()
-            .map(|bar| bar.candle.high)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let price_padding = ((max_price - min_price) * 0.08).max(max_price.abs() * 0.00001);
-        let interval = timeframe_seconds(&tab.key.timeframe);
-        let x_min = bars[0].timestamp_ms as f64 / 1_000.0 - interval * 0.75;
-        let x_max = bars[bars.len() - 1].timestamp_ms as f64 / 1_000.0 + interval * 0.75;
-        let x_link = egui::Id::NULL.with(("ohlcv-time-axis", tab.feed_id));
-
-        Plot::new(("ohlcv-price", tab.feed_id, chart.id))
-            .height(410.0)
-            .default_x_bounds(x_min, x_max.max(x_min + interval))
-            .default_y_bounds(min_price - price_padding, max_price + price_padding)
-            .link_axis(x_link, egui::Vec2b::new(true, false))
-            .grid_color(GRID)
-            .show_axes(egui::Vec2b::new(false, true))
-            .show_x(false)
-            .allow_boxed_zoom(false)
-            .show(ui, |plot_ui| {
-                for (index, bar) in bars.iter().enumerate() {
-                    let candle = bar.candle;
-                    let x = candle.timestamp_ms as f64 / 1_000.0;
-                    let body_color = if candle.is_bullish() {
-                        Color32::BLACK
-                    } else {
-                        Color32::WHITE
-                    };
-                    let body_low = candle.open.min(candle.close);
-                    let body_high = candle.open.max(candle.close);
-                    let body_height = (body_high - body_low).max(candle.open.abs() * 0.000002);
-                    let body_low = (body_low + body_high - body_height) * 0.5;
-                    let body_high = body_low + body_height;
-                    let half_width = interval * 0.32;
-
-                    plot_ui.line(
-                        Line::new(
-                            format!("wick-{}-{index}", chart.id),
-                            PlotPoints::from(vec![[x, candle.low], [x, candle.high]]),
-                        )
-                        .color(LIME)
-                        .width(1.2)
-                        .allow_hover(false),
-                    );
-
-                    plot_ui.polygon(
-                        Polygon::new(
-                            format!("candle-{}-{index}", chart.id),
-                            vec![
-                                [x - half_width, body_low],
-                                [x + half_width, body_low],
-                                [x + half_width, body_high],
-                                [x - half_width, body_high],
-                            ],
-                        )
-                        .fill_color(body_color)
-                        .stroke(Stroke::new(1.0, LIME))
-                        .allow_hover(false),
-                    );
-                }
-            });
-    }
-
-    fn show_volume_chart(
-        ui: &mut egui::Ui,
-        tab: &ChartTab,
-        chart: &Chart,
-        snapshot: &ChartSnapshot,
-    ) {
-        let bars = &snapshot.full_bars;
-        if bars.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("Esperando history/live…").color(MUTED));
-            });
-            return;
-        }
-
-        let max_volume = bars.iter().map(|bar| bar.candle.volume).fold(0.0, f64::max);
-        let interval = timeframe_seconds(&tab.key.timeframe);
-        let x_min = bars[0].timestamp_ms as f64 / 1_000.0 - interval * 0.75;
-        let x_max = bars[bars.len() - 1].timestamp_ms as f64 / 1_000.0 + interval * 0.75;
-        let plotted_bars = bars
-            .iter()
-            .map(|bar| {
-                Bar::new(bar.timestamp_ms as f64 / 1_000.0, bar.candle.volume)
-                    .width(interval * 0.64)
-                    .fill(LIME_GREEN)
-                    .stroke(Stroke::new(1.0, LIME_GREEN))
-            })
-            .collect();
-
-        Plot::new(("ohlcv-volume", tab.feed_id, chart.id))
-            .height(170.0)
-            .default_x_bounds(x_min, x_max.max(x_min + interval))
-            .default_y_bounds(0.0, (max_volume * 1.25).max(1.0))
-            .link_axis(
-                egui::Id::NULL.with(("ohlcv-time-axis", tab.feed_id)),
-                egui::Vec2b::new(true, false),
-            )
-            .grid_color(GRID)
-            .show_axes(egui::Vec2b::new(true, false))
-            .show_y(false)
-            .allow_boxed_zoom(false)
-            .show(ui, |plot_ui| {
-                plot_ui.bar_chart(BarChart::new("Volumen", plotted_bars).allow_hover(false));
-            });
-    }
 }
 
 impl eframe::App for ChartApp {
@@ -680,7 +508,7 @@ impl eframe::App for ChartApp {
                 ui.add_space(8.0);
 
                 if let Some(tab) = self.tabs.get(self.active_tab) {
-                    Self::show_tab_content(ui, tab, &mut action);
+                    Self::show_tab_content(ui, tab, &self.charts, &mut action);
                 } else {
                     ui.add_space(48.0);
                     ui.vertical_centered(|ui| {
@@ -707,33 +535,4 @@ impl eframe::App for ChartApp {
 
 fn feed_label(key: &FeedKey) -> String {
     format!("{}/{}/{}", key.source, key.symbol, key.timeframe)
-}
-
-fn timeframe_seconds(timeframe: &str) -> f64 {
-    match timeframe {
-        "1m" => 60.0,
-        "5m" => 300.0,
-        "15m" => 900.0,
-        "30m" => 1_800.0,
-        "1h" => 3_600.0,
-        "4h" => 14_400.0,
-        "1d" => 86_400.0,
-        _ => 60.0,
-    }
-}
-
-fn set_green_dark_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.override_text_color = Some(TEXT);
-    visuals.weak_text_color = Some(MUTED);
-    visuals.panel_fill = BACKGROUND;
-    visuals.window_fill = BACKGROUND;
-    visuals.extreme_bg_color = BACKGROUND;
-    visuals.faint_bg_color = PANEL;
-    visuals.hyperlink_color = LIME;
-    visuals.selection.bg_fill = Color32::from_rgb(30, 92, 57);
-    visuals.selection.stroke = Stroke::new(1.0, LIME);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(28, 56, 39);
-    visuals.widgets.active.bg_fill = Color32::from_rgb(35, 82, 52);
-    ctx.set_visuals(visuals);
 }
