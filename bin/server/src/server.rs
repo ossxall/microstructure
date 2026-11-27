@@ -14,13 +14,25 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{routes, state::AppState};
-use axum::Router;
-use tracing::info;
+use std::time::Duration;
+
+use axum::{
+    Router,
+    extract::Request,
+    http::StatusCode,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+};
+use tokio::time::timeout;
+use tracing::{info, warn};
+
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub async fn start_http_server(state: AppState) {
     let app: Router = Router::new()
         .nest("/api/market", routes::router())
-        .with_state(state);
+        .with_state(state)
+        .layer(middleware::from_fn(enforce_request_timeout));
 
     let listener: tokio::net::TcpListener =
         tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
@@ -28,4 +40,17 @@ pub async fn start_http_server(state: AppState) {
     info!("Master listening in :3001");
 
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn enforce_request_timeout(request: Request, next: Next) -> Response {
+    match timeout(HTTP_REQUEST_TIMEOUT, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => {
+            warn!(
+                timeout_seconds = HTTP_REQUEST_TIMEOUT.as_secs(),
+                "HTTP request timed out"
+            );
+            (StatusCode::GATEWAY_TIMEOUT, "Request timed out").into_response()
+        }
+    }
 }
