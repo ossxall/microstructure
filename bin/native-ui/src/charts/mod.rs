@@ -1,7 +1,6 @@
 mod shared;
 
-pub mod price;
-pub mod volume;
+pub mod main;
 
 use eframe::egui;
 
@@ -12,32 +11,28 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChartKind {
-    Price,
-    Volume,
+    Main,
 }
 
 impl ChartKind {
     /// The chart catalog is shared by every feed tab.
-    pub const ALL: [Self; 2] = [Self::Price, Self::Volume];
+    pub const ALL: [Self; 1] = [Self::Main];
 
     pub const fn title(self) -> &'static str {
         match self {
-            Self::Price => price::TITLE,
-            Self::Volume => volume::TITLE,
+            Self::Main => main::TITLE,
         }
     }
 
     pub const fn menu_label(self) -> &'static str {
         match self {
-            Self::Price => price::MENU_LABEL,
-            Self::Volume => volume::MENU_LABEL,
+            Self::Main => main::MENU_LABEL,
         }
     }
 
     pub fn data_request(self, history_limit: u64) -> ChartDataRequest {
         match self {
-            Self::Price => price::data_request(history_limit),
-            Self::Volume => volume::data_request(history_limit),
+            Self::Main => main::data_request(history_limit),
         }
     }
 
@@ -50,8 +45,7 @@ impl ChartKind {
         snapshot: &ChartSnapshot,
     ) {
         match self {
-            Self::Price => price::show(ui, chart_id, feed_id, timeframe, snapshot),
-            Self::Volume => volume::show(ui, chart_id, feed_id, timeframe, snapshot),
+            Self::Main => main::show(ui, chart_id, feed_id, timeframe, snapshot),
         }
     }
 }
@@ -124,24 +118,15 @@ mod tests {
     use crate::market::BarFields;
 
     #[test]
-    fn chart_data_requirements_are_declared_by_each_chart_module() {
-        let price = ChartKind::Price.data_request(125);
-        let volume = ChartKind::Volume.data_request(125);
+    fn main_chart_requests_price_and_volume_for_ohlcv() {
+        let main = ChartKind::Main.data_request(125);
 
-        assert_eq!(price.history_limit, 125);
-        assert!(price.live);
+        assert_eq!(main.history_limit, 1_000);
+        assert!(main.live);
         assert_eq!(
-            price.fields,
+            main.fields,
             BarFields {
                 price: true,
-                ..Default::default()
-            }
-        );
-        assert_eq!(volume.history_limit, 125);
-        assert!(volume.live);
-        assert_eq!(
-            volume.fields,
-            BarFields {
                 volume_flow: true,
                 ..Default::default()
             }

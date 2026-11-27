@@ -637,7 +637,7 @@ mod tests {
 
     fn layout(ids: &[u64]) -> ChartLayout {
         ids.iter()
-            .map(|id| Chart::new(*id, ChartKind::Price))
+            .map(|id| Chart::new(*id, ChartKind::Main))
             .collect()
     }
 
@@ -676,7 +676,7 @@ mod tests {
         let mut first_tab_charts = layout(&[1, 2]);
         let second_tab_charts = layout(&[3, 4]);
 
-        add_chart_to_layout(&mut first_tab_charts, Chart::new(5, ChartKind::Volume));
+        add_chart_to_layout(&mut first_tab_charts, Chart::new(5, ChartKind::Main));
         assert!(remove_chart_from_layout(&mut first_tab_charts, 1));
 
         assert_eq!(ids(&first_tab_charts), [2, 5]);
