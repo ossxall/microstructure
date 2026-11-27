@@ -5,6 +5,7 @@ pub mod main;
 use eframe::egui;
 
 use crate::{
+    app_log::AppLogger,
     market::{ChartDataRequest, ChartSnapshot},
     theme::PANEL,
 };
@@ -41,11 +42,13 @@ impl ChartKind {
         ui: &mut egui::Ui,
         chart_id: u64,
         feed_id: u64,
+        feed: &str,
         timeframe: &str,
         snapshot: &ChartSnapshot,
+        logger: &AppLogger,
     ) {
         match self {
-            Self::Main => main::show(ui, chart_id, feed_id, timeframe, snapshot),
+            Self::Main => main::show(ui, chart_id, feed_id, feed, timeframe, snapshot, logger),
         }
     }
 }
@@ -71,8 +74,10 @@ pub fn show_window(
     ctx: &egui::Context,
     chart: Chart,
     feed_id: u64,
+    feed: &str,
     timeframe: &str,
     snapshot: &ChartSnapshot,
+    logger: &AppLogger,
     layout_revision: u64,
     chart_area: egui::Rect,
     default_pos: egui::Pos2,
@@ -107,7 +112,7 @@ pub fn show_window(
     window.show(ctx, |ui| {
         chart
             .kind
-            .render(ui, chart.id, feed_id, timeframe, snapshot);
+            .render(ui, chart.id, feed_id, feed, timeframe, snapshot, logger);
     });
     !open
 }

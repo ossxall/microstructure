@@ -549,6 +549,7 @@ impl eframe::App for ChartApp {
         if let (Some(tab), Some(chart_area)) = (self.tabs.get(self.active_tab), chart_area) {
             let chart_count = tab.charts.len();
             let snapshot = tab.snapshot_rx.borrow().clone();
+            let feed = feed_label(&tab.key);
             for (index, chart) in tab.charts.iter().copied().enumerate() {
                 let (default_pos, default_size, min_size) =
                     chart_window_geometry(chart_area, index, chart_count);
@@ -556,8 +557,10 @@ impl eframe::App for ChartApp {
                     ui.ctx(),
                     chart,
                     tab.feed_id,
+                    &feed,
                     &tab.key.timeframe,
                     &snapshot,
+                    &self.logger,
                     self.chart_layout_revision,
                     chart_area,
                     default_pos,
