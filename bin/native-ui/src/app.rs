@@ -21,6 +21,8 @@ use crate::{
 struct ChartTab {
     feed_id: u64,
     key: FeedKey,
+    /// Order of the shared chart catalog for this tab.
+    chart_order: Vec<u64>,
     requested_history: u64,
     _calculation_tx: mpsc::Sender<crate::market::CalculationInput>,
     snapshot_rx: watch::Receiver<Arc<ChartSnapshot>>,
@@ -43,6 +45,12 @@ pub struct ChartApp {
 enum TabAction {
     AddChart(ChartKind),
     RemoveChart(u64),
+    MoveChart {
+        feed_id: u64,
+        dragged_chart_id: u64,
+        target_chart_id: u64,
+        after: bool,
+    },
     LoadMoreHistory,
 }
 
@@ -196,6 +204,7 @@ impl ChartApp {
         self.tabs.push(ChartTab {
             feed_id,
             key,
+            chart_order: self.charts.iter().map(|chart| chart.id).collect(),
             requested_history,
             _calculation_tx: calculation_tx,
             snapshot_rx,
@@ -268,6 +277,9 @@ impl ChartApp {
         }
         let chart = self.new_chart(kind);
         self.charts.push(chart);
+        for tab in &mut self.tabs {
+            tab.chart_order.push(chart.id);
+        }
         self.update_chart_requests();
         self.logger.info(
             None,
@@ -302,11 +314,38 @@ impl ChartApp {
         if self.charts.len() == old_len {
             return;
         }
+        for tab in &mut self.tabs {
+            tab.chart_order.retain(|id| *id != chart_id);
+        }
         self.update_chart_requests();
         self.logger.info(
             None,
             "Chart cerrado en todas las pestañas; cálculo actualizado",
         );
+    }
+
+    fn move_chart(
+        &mut self,
+        feed_id: u64,
+        dragged_chart_id: u64,
+        target_chart_id: u64,
+        after: bool,
+    ) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.feed_id == feed_id) else {
+            return;
+        };
+
+        if move_chart_in_order(
+            &mut tab.chart_order,
+            dragged_chart_id,
+            target_chart_id,
+            after,
+        ) {
+            self.logger.info(
+                Some(feed_label(&tab.key)),
+                "Orden de Charts actualizado en esta pestaña",
+            );
+        }
     }
 
     fn show_log_window(&mut self, ctx: &egui::Context) {
@@ -468,15 +507,23 @@ impl ChartApp {
         ui.separator();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for chart in chart_layout.iter().copied() {
-                if charts::show(
+                let response = charts::show(
                     ui,
                     chart,
                     tab.feed_id,
                     &tab.key.timeframe,
                     &snapshot,
                     chart_layout.len() > 1,
-                ) {
+                );
+                if response.close {
                     *action = Some(TabAction::RemoveChart(chart.id));
+                } else if let Some(drop) = response.drop {
+                    *action = Some(TabAction::MoveChart {
+                        feed_id: tab.feed_id,
+                        dragged_chart_id: drop.dragged_chart_id,
+                        target_chart_id: drop.target_chart_id,
+                        after: drop.after,
+                    });
                 }
             }
         });
@@ -508,7 +555,17 @@ impl eframe::App for ChartApp {
                 ui.add_space(8.0);
 
                 if let Some(tab) = self.tabs.get(self.active_tab) {
-                    Self::show_tab_content(ui, tab, &self.charts, &mut action);
+                    let chart_layout = tab
+                        .chart_order
+                        .iter()
+                        .filter_map(|chart_id| {
+                            self.charts
+                                .iter()
+                                .find(|chart| chart.id == *chart_id)
+                                .copied()
+                        })
+                        .collect::<Vec<_>>();
+                    Self::show_tab_content(ui, tab, &chart_layout, &mut action);
                 } else {
                     ui.add_space(48.0);
                     ui.vertical_centered(|ui| {
@@ -527,6 +584,12 @@ impl eframe::App for ChartApp {
         match action {
             Some(TabAction::AddChart(kind)) => self.add_chart(kind),
             Some(TabAction::RemoveChart(chart_id)) => self.remove_chart(chart_id),
+            Some(TabAction::MoveChart {
+                feed_id,
+                dragged_chart_id,
+                target_chart_id,
+                after,
+            }) => self.move_chart(feed_id, dragged_chart_id, target_chart_id, after),
             Some(TabAction::LoadMoreHistory) => self.load_more_history(),
             None => {}
         }
@@ -535,4 +598,80 @@ impl eframe::App for ChartApp {
 
 fn feed_label(key: &FeedKey) -> String {
     format!("{}/{}/{}", key.source, key.symbol, key.timeframe)
+}
+
+fn move_chart_in_order(
+    chart_order: &mut Vec<u64>,
+    dragged_chart_id: u64,
+    target_chart_id: u64,
+    after: bool,
+) -> bool {
+    if dragged_chart_id == target_chart_id {
+        return false;
+    }
+
+    let Some(dragged_index) = chart_order
+        .iter()
+        .position(|chart_id| *chart_id == dragged_chart_id)
+    else {
+        return false;
+    };
+    if !chart_order
+        .iter()
+        .any(|chart_id| *chart_id == target_chart_id)
+    {
+        return false;
+    }
+
+    let original_order = chart_order.clone();
+    let dragged_chart_id = chart_order.remove(dragged_index);
+    let Some(target_index) = chart_order
+        .iter()
+        .position(|chart_id| *chart_id == target_chart_id)
+    else {
+        return false;
+    };
+    let insertion_index = target_index + usize::from(after);
+    chart_order.insert(insertion_index, dragged_chart_id);
+
+    *chart_order != original_order
+}
+
+#[cfg(test)]
+mod tests {
+    use super::move_chart_in_order;
+
+    #[test]
+    fn moving_chart_before_another_changes_only_the_requested_order() {
+        let mut order = vec![1, 2, 3];
+
+        assert!(move_chart_in_order(&mut order, 3, 1, false));
+        assert_eq!(order, [3, 1, 2]);
+    }
+
+    #[test]
+    fn moving_chart_after_another_changes_only_the_requested_order() {
+        let mut order = vec![1, 2, 3];
+
+        assert!(move_chart_in_order(&mut order, 1, 2, true));
+        assert_eq!(order, [2, 1, 3]);
+    }
+
+    #[test]
+    fn dropping_in_the_existing_position_is_a_no_op() {
+        let mut order = vec![1, 2, 3];
+
+        assert!(!move_chart_in_order(&mut order, 2, 3, false));
+        assert_eq!(order, [1, 2, 3]);
+    }
+
+    #[test]
+    fn reordering_one_tab_does_not_change_another_tabs_layout() {
+        let mut first_tab_order = vec![1, 2, 3];
+        let second_tab_order = vec![1, 2, 3];
+
+        assert!(move_chart_in_order(&mut first_tab_order, 3, 1, false));
+        assert_eq!(first_tab_order, [3, 1, 2]);
+        assert_eq!(second_tab_order, [1, 2, 3]);
+    }
 }
