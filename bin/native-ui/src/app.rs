@@ -41,6 +41,7 @@ pub struct ChartApp {
     logger: AppLogger,
     logs_open: bool,
     info_bar_visible: bool,
+    chart_layout_revision: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -68,6 +69,7 @@ impl ChartApp {
             logger,
             logs_open: false,
             info_bar_visible: false,
+            chart_layout_revision: 0,
         }
     }
 
@@ -145,6 +147,7 @@ impl ChartApp {
 
         if toggle_info_bar {
             self.info_bar_visible = !self.info_bar_visible;
+            self.chart_layout_revision = self.chart_layout_revision.wrapping_add(1);
             let feed = self
                 .tabs
                 .get(self.active_tab)
@@ -555,6 +558,7 @@ impl eframe::App for ChartApp {
                     tab.feed_id,
                     &tab.key.timeframe,
                     &snapshot,
+                    self.chart_layout_revision,
                     chart_area,
                     default_pos,
                     default_size,

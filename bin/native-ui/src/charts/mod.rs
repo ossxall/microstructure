@@ -79,6 +79,7 @@ pub fn show_window(
     feed_id: u64,
     timeframe: &str,
     snapshot: &ChartSnapshot,
+    layout_revision: u64,
     chart_area: egui::Rect,
     default_pos: egui::Pos2,
     default_size: egui::Vec2,
@@ -88,7 +89,11 @@ pub fn show_window(
     let mut open = true;
     let title = egui::RichText::new(chart.kind.title()).small();
     let mut window = egui::Window::new(title)
-        .id(egui::Id::unique(("chart-window", chart.id)))
+        .id(egui::Id::unique((
+            "chart-window",
+            chart.id,
+            layout_revision,
+        )))
         .default_pos(default_pos)
         .default_size(default_size)
         .min_size(min_size)
