@@ -4,6 +4,7 @@ use egui_plot::{Axis, HPlacement, Line, Plot, PlotMemory, PlotPoints, Polygon};
 use crate::{
     app_log::AppLogger,
     charts::shared::{self, show_waiting},
+    charts::{ChartIndicatorData, ChartKind, IndicatorSnapshot},
     market::ChartSnapshot,
     theme::{EMA_55, EMA_200, GRID, LIME, VOLUME},
 };
@@ -17,6 +18,7 @@ pub fn show(
     feed: &str,
     timeframe: &str,
     snapshot: &ChartSnapshot,
+    indicator_snapshot: &IndicatorSnapshot,
     logger: &AppLogger,
 ) {
     let bars = &snapshot.full_bars;
@@ -181,27 +183,37 @@ pub fn show(
             );
         }
 
-        let ema_values = bars
-            .iter()
-            .map(|bar| (bar.candle.timestamp_ms as f64 / 1_000.0, bar.candle.close))
-            .collect::<Vec<_>>();
-        for (period, color) in [
-            (indicators::EMA_55_PERIOD, EMA_55),
-            (indicators::EMA_200_PERIOD, EMA_200),
-        ] {
-            let points = indicators::points(&ema_values, period)
-                .into_iter()
-                .filter(|point| point[0] >= *x_bounds.start() && point[0] <= *x_bounds.end())
-                .collect::<Vec<_>>();
-            if points.is_empty() {
-                continue;
+        if indicator_snapshot.source_generation == snapshot.generation
+            && let Some(ChartIndicatorData::Main(main_indicators)) =
+                indicator_snapshot.charts.get(&ChartKind::Main)
+        {
+            for (period, color, source_points) in [
+                (
+                    indicators::EMA_55_PERIOD,
+                    EMA_55,
+                    main_indicators.ema_55.as_ref(),
+                ),
+                (
+                    indicators::EMA_200_PERIOD,
+                    EMA_200,
+                    main_indicators.ema_200.as_ref(),
+                ),
+            ] {
+                let points = source_points
+                    .iter()
+                    .copied()
+                    .filter(|point| point[0] >= *x_bounds.start() && point[0] <= *x_bounds.end())
+                    .collect::<Vec<_>>();
+                if points.is_empty() {
+                    continue;
+                }
+                plot_ui.line(
+                    Line::new(format!("EMA {period}"), PlotPoints::from(points))
+                        .color(color)
+                        .width(1.8)
+                        .allow_hover(false),
+                );
             }
-            plot_ui.line(
-                Line::new(format!("EMA {period}"), PlotPoints::from(points))
-                    .color(color)
-                    .width(1.8)
-                    .allow_hover(false),
-            );
         }
     });
 }

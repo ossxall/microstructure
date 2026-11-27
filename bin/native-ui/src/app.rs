@@ -9,7 +9,7 @@ use tokio::sync::watch;
 
 use crate::{
     app_log::{AppLogger, LogLevel, format_elapsed},
-    charts::{self, Chart, ChartKind},
+    charts::{self, Chart, ChartKind, IndicatorSnapshot, spawn_indicator_worker},
     market::{
         CalculationWorkerConfig, ChartDataRequest, ChartSnapshot, DEFAULT_HISTORY_LIMIT, FeedKey,
         FeedStatus, spawn_calculation_worker,
@@ -26,6 +26,9 @@ struct ChartTab {
     requested_history: u64,
     _calculation_tx: mpsc::Sender<crate::market::CalculationInput>,
     snapshot_rx: watch::Receiver<Arc<ChartSnapshot>>,
+    indicator_rx: watch::Receiver<Arc<IndicatorSnapshot>>,
+    indicator_plan_tx: watch::Sender<Arc<[ChartKind]>>,
+    indicator_signal_tx: mpsc::SyncSender<()>,
 }
 
 type ChartLayout = Vec<Chart>;
@@ -199,6 +202,10 @@ impl ChartApp {
 
         let (calculation_tx, calculation_rx) = mpsc::channel();
         let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(ChartSnapshot::default()));
+        let (indicator_tx, indicator_rx) = watch::channel(Arc::new(IndicatorSnapshot::default()));
+        let (indicator_plan_tx, indicator_plan_rx) =
+            watch::channel(Self::indicator_plan(&chart_layout));
+        let (indicator_signal_tx, indicator_signal_rx) = mpsc::sync_channel(1);
 
         let _ = self.network.sender.send(NetworkCommand::OpenFeed {
             feed_id,
@@ -208,11 +215,22 @@ impl ChartApp {
             calculation_tx: calculation_tx.clone(),
         });
 
+        spawn_indicator_worker(
+            feed_id,
+            snapshot_rx.clone(),
+            indicator_plan_rx,
+            indicator_signal_rx,
+            indicator_tx,
+            self.egui_ctx.clone(),
+            self.active_feed_id.clone(),
+        );
+
         spawn_calculation_worker(CalculationWorkerConfig {
             feed_id,
             requests,
             receiver: calculation_rx,
             snapshot_tx,
+            indicator_update_tx: indicator_signal_tx.clone(),
             network_tx: self.network.sender.clone(),
             egui_ctx: self.egui_ctx.clone(),
             active_feed_id: self.active_feed_id.clone(),
@@ -231,6 +249,9 @@ impl ChartApp {
             requested_history,
             _calculation_tx: calculation_tx,
             snapshot_rx,
+            indicator_rx,
+            indicator_plan_tx,
+            indicator_signal_tx,
         });
         self.activate_tab(self.tabs.len() - 1);
     }
@@ -248,9 +269,22 @@ impl ChartApp {
             .collect()
     }
 
+    fn indicator_plan(chart_layout: &ChartLayout) -> Arc<[ChartKind]> {
+        let mut kinds = Vec::new();
+        for chart in chart_layout {
+            if !kinds.contains(&chart.kind) {
+                kinds.push(chart.kind);
+            }
+        }
+        kinds.into()
+    }
+
     fn update_chart_requests(&self, feed_id: u64) {
         if let Some(tab) = self.tabs.iter().find(|tab| tab.feed_id == feed_id) {
             let requests = Self::chart_requests(&tab.charts, tab.requested_history);
+            tab.indicator_plan_tx
+                .send_replace(Self::indicator_plan(&tab.charts));
+            let _ = tab.indicator_signal_tx.try_send(());
             let _ = tab
                 ._calculation_tx
                 .send(crate::market::CalculationInput::ChartRequests(requests));
@@ -549,6 +583,7 @@ impl eframe::App for ChartApp {
         if let (Some(tab), Some(chart_area)) = (self.tabs.get(self.active_tab), chart_area) {
             let chart_count = tab.charts.len();
             let snapshot = tab.snapshot_rx.borrow().clone();
+            let indicators = tab.indicator_rx.borrow().clone();
             let feed = feed_label(&tab.key);
             for (index, chart) in tab.charts.iter().copied().enumerate() {
                 let (default_pos, default_size, min_size) =
@@ -560,6 +595,7 @@ impl eframe::App for ChartApp {
                     &feed,
                     &tab.key.timeframe,
                     &snapshot,
+                    &indicators,
                     &self.logger,
                     self.chart_layout_revision,
                     chart_area,

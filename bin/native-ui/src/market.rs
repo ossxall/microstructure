@@ -3,7 +3,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
-        mpsc::Receiver,
+        mpsc::{Receiver, SyncSender},
     },
     thread,
 };
@@ -69,6 +69,8 @@ pub enum FeedStatus {
 
 #[derive(Clone, Debug)]
 pub struct ChartSnapshot {
+    /// Increments whenever a new market snapshot is published.
+    pub generation: u64,
     pub status: FeedStatus,
     pub history_error: Option<String>,
     /// Complete, reconciled Bars shared by every Chart in this feed.
@@ -105,6 +107,7 @@ impl BarSnapshot {
 impl Default for ChartSnapshot {
     fn default() -> Self {
         Self {
+            generation: 0,
             status: FeedStatus::Loading,
             history_error: None,
             full_bars: Arc::from([]),
@@ -124,6 +127,7 @@ pub struct CalculationWorkerConfig {
     pub requests: Vec<ChartDataRequest>,
     pub receiver: Receiver<CalculationInput>,
     pub snapshot_tx: watch::Sender<Arc<ChartSnapshot>>,
+    pub indicator_update_tx: SyncSender<()>,
     pub network_tx: UnboundedSender<NetworkCommand>,
     pub egui_ctx: egui::Context,
     pub active_feed_id: Arc<AtomicU64>,
@@ -179,6 +183,7 @@ pub fn spawn_calculation_worker(config: CalculationWorkerConfig) -> thread::Join
         requests,
         receiver,
         snapshot_tx,
+        indicator_update_tx,
         network_tx,
         egui_ctx,
         active_feed_id,
@@ -200,6 +205,7 @@ pub fn spawn_calculation_worker(config: CalculationWorkerConfig) -> thread::Join
             let mut bars = BTreeMap::<u64, StoredBar>::new();
             let mut status = FeedStatus::Loading;
             let mut history_error = None;
+            let mut generation = 0_u64;
 
             while let Ok(first) = receiver.recv() {
                 let previous_history_limit = requested_history_limit(&requests);
@@ -240,13 +246,18 @@ pub fn spawn_calculation_worker(config: CalculationWorkerConfig) -> thread::Join
                 }
 
                 if dirty {
+                    generation = generation.wrapping_add(1);
                     let full_bars = bars.values().map(snapshot_bar).collect::<Vec<_>>();
                     let snapshot = Arc::new(ChartSnapshot {
+                        generation,
                         status: status.clone(),
                         history_error: history_error.clone(),
                         full_bars: full_bars.into(),
                     });
                     snapshot_tx.send_replace(snapshot);
+                    // The indicator worker reads the latest watch value. A
+                    // capacity-one signal coalesces updates while it is busy.
+                    let _ = indicator_update_tx.try_send(());
 
                     if active_feed_id.load(Ordering::Relaxed) == feed_id {
                         egui_ctx.request_repaint();

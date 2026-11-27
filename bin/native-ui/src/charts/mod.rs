@@ -1,6 +1,9 @@
+mod indicator_worker;
 mod shared;
 
 pub mod main;
+
+use std::{collections::HashMap, sync::Arc};
 
 use eframe::egui;
 
@@ -10,7 +13,35 @@ use crate::{
     theme::PANEL,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub use indicator_worker::spawn_indicator_worker;
+
+#[derive(Clone, Debug)]
+pub struct MainIndicatorData {
+    pub ema_55: Arc<[[f64; 2]]>,
+    pub ema_200: Arc<[[f64; 2]]>,
+}
+
+impl Default for MainIndicatorData {
+    fn default() -> Self {
+        Self {
+            ema_55: Vec::new().into(),
+            ema_200: Vec::new().into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ChartIndicatorData {
+    Main(MainIndicatorData),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IndicatorSnapshot {
+    pub source_generation: u64,
+    pub charts: HashMap<ChartKind, ChartIndicatorData>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChartKind {
     Main,
 }
@@ -37,6 +68,12 @@ impl ChartKind {
         }
     }
 
+    fn calculate_indicators(self, snapshot: &ChartSnapshot) -> ChartIndicatorData {
+        match self {
+            Self::Main => ChartIndicatorData::Main(main::calculate_indicators(snapshot)),
+        }
+    }
+
     fn render(
         self,
         ui: &mut egui::Ui,
@@ -45,10 +82,13 @@ impl ChartKind {
         feed: &str,
         timeframe: &str,
         snapshot: &ChartSnapshot,
+        indicators: &IndicatorSnapshot,
         logger: &AppLogger,
     ) {
         match self {
-            Self::Main => main::show(ui, chart_id, feed_id, feed, timeframe, snapshot, logger),
+            Self::Main => main::show(
+                ui, chart_id, feed_id, feed, timeframe, snapshot, indicators, logger,
+            ),
         }
     }
 }
@@ -77,6 +117,7 @@ pub fn show_window(
     feed: &str,
     timeframe: &str,
     snapshot: &ChartSnapshot,
+    indicators: &IndicatorSnapshot,
     logger: &AppLogger,
     layout_revision: u64,
     chart_area: egui::Rect,
@@ -110,9 +151,9 @@ pub fn show_window(
         window = window.open(&mut open);
     }
     window.show(ctx, |ui| {
-        chart
-            .kind
-            .render(ui, chart.id, feed_id, feed, timeframe, snapshot, logger);
+        chart.kind.render(
+            ui, chart.id, feed_id, feed, timeframe, snapshot, indicators, logger,
+        );
     });
     !open
 }

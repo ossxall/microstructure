@@ -31,7 +31,11 @@ evento live y sus metadatos, como `event_id` o `is_final`. En history, el payloa
 suele ser directamente el objeto Bar. Ambos métodos exponen la estructura JSON
 parseada, no el texto original byte por byte. Los datos se comparten mediante
 `Arc`, sin clonar el contenido al publicar el snapshot. El OHLCV actual solo
-proyecta precio y `volume_flow.total_qty` para el dibujo.
+proyecta precio y `volume_flow.total_qty` para el dibujo. Cada tab tiene además
+un worker de indicadores: recibe snapshots y el plan de Charts, calcula sus
+series fuera del render y publica resultados inmutables. El render consume las
+series vigentes; los objetos `egui_plot` y los cálculos dependientes del viewport
+se mantienen en la UI.
 
 Arrastra el asa `⠿` de un Chart y suéltalo sobre un borde de otro: arriba/abajo
 para reordenarlos en filas, o a la izquierda/derecha para ponerlos en la misma
