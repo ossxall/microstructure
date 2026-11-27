@@ -24,11 +24,9 @@ name = "aggregator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "chrono",
  "crc32fast",
  "dotenvy",
- "flate2",
  "memmap2",
  "num-bigint",
  "pulsar",

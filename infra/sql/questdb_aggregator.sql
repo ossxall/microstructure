@@ -1,14 +1,3 @@
-CREATE TABLE IF NOT EXISTS {bars_table} (
-    time TIMESTAMP,
-    source SYMBOL,
-    symbol SYMBOL,
-    revision LONG,
-    event_id VARCHAR,
-    payload VARCHAR
-) TIMESTAMP(time)
-PARTITION BY DAY
-DEDUP UPSERT KEYS (time, source, symbol);
-
 CREATE TABLE IF NOT EXISTS {event_table} (
     time TIMESTAMP,
     event_id VARCHAR,

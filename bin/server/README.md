@@ -2,9 +2,8 @@
 
 `POST /api/market/get-history` serves finalized Bars from the aggregator's
 append-only Bar store. It refreshes the read-only index before reading and
-returns history in ascending timestamp order. QuestDB remains a fallback for
-Bars absent from the local store; local records take precedence when both
-sources contain the same timestamp.
+returns history in ascending timestamp order. The local Bar store is the only
+history source; the endpoint does not query QuestDB for Bars absent from it.
 
 By default, the server resolves the store under
 `bin/aggregator/data/bars` and opens timeframe-specific directories such as

@@ -3,8 +3,9 @@
 Este documento describe la lógica actual de `bin/aggregator` y el contrato JSON
 versión 4 de `Bar`, serializado por `src/model.rs`. Cada proceso trabaja con un
 timeframe configurado; el mismo esquema se usa para todos ellos. Las barras se
-guardan como JSON en QuestDB y se incluyen en `data` de los eventos enviados a
-Pulsar.
+persisten únicamente en el BarStore local append-only y se incluyen en `data` de
+los eventos enviados a Pulsar. QuestDB conserva ticks, cursor y metadatos del
+outbox; las filas nuevas del outbox no contienen el payload de la barra.
 
 La versión 4 no es compatible en el wire format con la versión 3: añade
 `timeframe` a la barra e identidad, y `active_seconds` cuenta segundos UTC
@@ -22,16 +23,14 @@ como cadenas decimales, renombró `returns` a `price_changes` y agregó
 - `src/model.rs`: define `Tick`, `Bar` y sus estructuras anidadas; ordena y
   valida los ticks, calcula métricas, footprint, distribuciones, integridad y
   checksum.
-- `src/persistence.rs`: crea/verifica el esquema QuestDB, lee ticks y barras
-  existentes, guarda barras, cursor y outbox, y recupera eventos pendientes.
+- `src/persistence.rs`: crea/verifica el esquema QuestDB, lee ticks y administra
+  cursor, metadatos del outbox y eventos pendientes.
+- `src/bar_store.rs`: persiste y recupera las barras finales desde segmentos
+  locales append-only.
 - `src/registry.rs`: asigna IDs numéricos estables a fuentes y símbolos y los
   guarda en un archivo JSON por timeframe.
 - `src/config.rs`: carga `.env.dev` y variables de entorno, valida opciones y
   resuelve duración y rutas específicas del timeframe.
-- `bin/shared/payload_codec.rs` (incluido desde `src/main.rs`): comprime con
-  gzip y Base64 los payloads que se guardan en QuestDB cuando reduce su tamaño;
-  al leerlos, también acepta filas JSON antiguas sin comprimir. La salida
-  enviada a Pulsar sigue siendo JSON.
 
 El runtime usa Tokio para coordinar el sondeo final, el sondeo live y el cierre
 ordenado de productores Pulsar. Las operaciones síncronas de QuestDB se ejecutan
@@ -50,10 +49,10 @@ flowchart TD
     E -- No --> K["Avanzar y persistir cursor"]
     E -- Sí --> F["Agrupar por source y symbol"]
     F --> G["Ordenar, validar y construir Bar"]
-    G --> H{"¿Cambió el JSON<br/>respecto a la revisión guardada?"}
-    H -- Sí --> I["Guardar barra en QuestDB"]
+    G --> H{"¿Cambió la Bar<br/>respecto al BarStore?"}
+    H -- Sí --> I["Guardar Bar en BarStore"]
     H -- No --> J["Conservar revisión"]
-    I --> L["Guardar evento pendiente en outbox"]
+    I --> L["Guardar metadatos del evento en outbox"]
     J --> M{"¿Falta el evento<br/>de esta revisión?"}
     M -- Sí --> L
     M -- No --> K
@@ -75,7 +74,7 @@ cerradas, actualiza el cursor y usa la outbox durable; el segundo solo vuelve a
 leer la ventana UTC activa y mantiene en memoria el último JSON por barra para
 detectar cambios. Un error en un ciclo se registra y se reintenta en el siguiente
 sondeo; las barras finales y sus eventos pendientes se pueden recuperar desde
-QuestDB.
+el BarStore local y los metadatos del outbox en QuestDB.
 
 Las ventanas son UTC y semiabiertas: `[inicio, fin)`. Una ventana sin ticks no
 genera barras, pero sí puede avanzar el cursor. Una ventana con datos se divide
@@ -83,38 +82,36 @@ por `(source, symbol)`; cada grupo produce una barra independiente.
 
 ### Revisiones, almacenamiento y entrega
 
-El agregador compara el JSON recalculado con el payload persistido. Si cambió,
-incrementa `revision`, actualiza la barra y crea un evento nuevo; si no cambió,
-reutiliza la revisión y evita duplicar el evento cuando ya está en el outbox.
-La clave de barra es
+El agregador compara la Bar recalculada con la versión de la misma clave leída
+del BarStore. Si cambió, incrementa `revision` y agrega la nueva versión; si no
+cambió, reutiliza la revisión y evita duplicar el evento cuando ya está en el
+outbox. La clave de barra es
 `{source}/{symbol}/{timeframe}/{timestamp_ms}` y el ID de evento agrega
 `:r{revision}`.
 
-La barra y el evento pendiente se escriben en QuestDB con confirmación durable,
-en escrituras separadas. Después, los eventos del outbox se publican en Pulsar y
-se marcan como publicados. QuestDB y Pulsar no comparten una transacción: la
-entrega es al menos una vez, así que puede haber duplicados si el proceso cae
-después de publicar y antes de registrar la confirmación. Los consumidores deben
-hacer idempotencia con `event_id`.
-
-Las barras finales se guardan en `bars_{timeframe}` y sus eventos en la tabla
-outbox del timeframe. El codec compartido almacena los payloads como
-`gzip+base64:` cuando la compresión reduce el tamaño; los payloads pequeños
-pueden quedar como JSON plano. El límite seguro por fila almacenada es 15 MiB
-para dejar margen bajo el máximo de 16 MiB de un frame QWP. Al recuperar un
-payload, el codec lo decodifica antes de comparar barras o publicar el evento.
-Pulsar recibe el sobre JSON sin esta compresión.
+La Bar se sincroniza localmente antes de escribir en QuestDB una fila de outbox
+con `event_id`, clave, revisión y estado de publicación, pero sin el payload de
+la Bar. Al despachar, el agregador reconstruye el sobre desde el registro local
+correspondiente. Las filas pendientes antiguas también se reconstruyen desde el
+BarStore sin leer el payload legado; la columna antigua se vacía al marcarlas
+publicadas.
+QuestDB y Pulsar no comparten una transacción: la entrega es al menos una vez,
+así que puede haber duplicados si el proceso cae después de publicar y antes de
+registrar la confirmación. Los consumidores deben hacer idempotencia con
+`event_id`. El BarStore debe permanecer en almacenamiento persistente para poder
+reconstruir eventos pendientes.
 
 Los topics se enrutan por fuente, símbolo y timeframe:
 `{PULSAR_NAMESPACE}/bars-{source}-{symbol}-{timeframe}`. Cada segmento de
 fuente, símbolo y timeframe solo puede contener caracteres ASCII alfanuméricos,
 guion o guion bajo; el agregador rechaza valores que no cumplan esa regla.
 
-Cada timeframe aísla sus tablas, cursor, outbox, registro de IDs y directorio
-store-and-forward. Para `1m` se conservan los nombres históricos (`bars_1m`,
-`bar_events`, `aggregator_state`); los demás timeframes usan nombres con sufijo,
-por ejemplo `bars_5m`, `bar_events_5m` y `aggregator_state_5m`. Debe ejecutarse
-una sola instancia activa por timeframe y base de datos.
+Cada timeframe aísla su cursor, outbox, registro de IDs y BarStore. Para `1m` se
+conservan los nombres históricos `bar_events` y `aggregator_state`; los demás
+timeframes usan nombres con sufijo, por ejemplo `bar_events_5m` y
+`aggregator_state_5m`. Las tablas `bars_*` antiguas no se consultan ni actualizan
+y no se eliminan automáticamente. Debe ejecutarse una sola instancia activa por
+timeframe y base de datos.
 
 ### Eventos de barras live
 

@@ -14,12 +14,10 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 mod config;
-#[path = "../../shared/payload_codec.rs"]
-mod payload_codec;
 mod persistence;
 mod registry;
 
-use aggregator::bar_store::BarStore;
+use aggregator::bar_store::{BarKey, BarStore};
 use aggregator::model;
 use aggregator::model::{Bar, Tick, build_bar_for_timeframe};
 use anyhow::{Context, Result};
@@ -134,7 +132,7 @@ async fn main() -> Result<()> {
                 ).await {
                     error!(
                     error = %format!("{error:#}"),
-                    "Aggregator cycle failed; work remains recoverable from QuestDB"
+                    "Aggregator cycle failed; source ticks and the event outbox remain recoverable from QuestDB"
                     );
                 }
             }
@@ -255,6 +253,7 @@ async fn run_cycle(
 ) -> Result<()> {
     dispatch_pending_events(
         Arc::clone(&db),
+        Arc::clone(&bar_store),
         &config.timeframe,
         pulsar,
         producers,
@@ -310,6 +309,7 @@ async fn run_cycle(
         .await?;
         dispatch_pending_events(
             Arc::clone(&db),
+            Arc::clone(&bar_store),
             &config.timeframe,
             pulsar,
             producers,
@@ -365,7 +365,7 @@ async fn run_live_cycle(
     )?;
 
     // Only the active timeframe is held in memory. Old snapshots are transient
-    // and are never written to the finalized bars table or its durable outbox.
+    // and are never written to the finalized BarStore or its durable outbox.
     live_snapshots.retain(|(timestamp, _, _), _| *timestamp >= bucket_start_ms);
 
     let ticks = {
@@ -488,15 +488,25 @@ async fn process_bucket(
             .or_default()
             .push(tick);
     }
-    let bucket_time_us = start_us;
+    let keys = groups.keys().cloned().collect::<Vec<_>>();
     let existing = {
-        let db = Arc::clone(&db);
+        let bar_store = Arc::clone(&bar_store);
         let timeframe = timeframe.to_string();
         tokio::task::spawn_blocking(move || {
-            persistence::existing_bars(&db, &timeframe, bucket_time_us)
+            let mut bars = BTreeMap::new();
+            for (source, symbol) in keys {
+                let key = BarKey::new(
+                    bucket_start_ms,
+                    source.clone(),
+                    symbol.clone(),
+                    timeframe.clone(),
+                );
+                bars.insert((source, symbol), bar_store.read(&key)?);
+            }
+            Ok::<_, anyhow::Error>(bars)
         })
         .await
-        .context("QuestDB existing-bars query task failed")??
+        .context("Bar store lookup task failed")??
     };
 
     for ((source, symbol), group) in groups {
@@ -512,12 +522,14 @@ async fn process_bucket(
         .with_context(|| {
             format!("Failed to aggregate {source}/{symbol} at {bucket_start_ms} ({timeframe})")
         })?;
-        let prior = existing.get(&(source.clone(), symbol.clone()));
+        let prior = existing
+            .get(&(source.clone(), symbol.clone()))
+            .and_then(Option::as_ref);
         let mut changed = true;
         if let Some(prior) = prior {
             bar.revision = prior.revision;
             let current_payload = serde_json::to_string(&bar)?;
-            if current_payload == prior.payload {
+            if current_payload == serde_json::to_string(prior)? {
                 changed = false;
             } else {
                 bar.revision = prior
@@ -540,16 +552,7 @@ async fn process_bucket(
             .context("QuestDB outbox lookup task failed")??
         };
         if changed {
-            persist_bar(
-                Arc::clone(&db),
-                Arc::clone(&bar_store),
-                timeframe,
-                &bar,
-                &event_id,
-            )
-            .await?;
-        } else {
-            ensure_bar_store(Arc::clone(&bar_store), &bar).await?;
+            persist_bar(Arc::clone(&bar_store), &bar).await?;
         }
         if !changed && event_exists {
             continue;
@@ -569,66 +572,22 @@ async fn process_bucket(
     Ok(())
 }
 
-async fn persist_bar(
-    db: Arc<QuestDb>,
-    bar_store: Arc<BarStore>,
-    timeframe: &str,
-    bar: &Bar,
-    event_id: &str,
-) -> Result<()> {
-    let db = Arc::clone(&db);
+async fn persist_bar(bar_store: Arc<BarStore>, bar: &Bar) -> Result<()> {
     let bar_store = Arc::clone(&bar_store);
     let bar = bar.clone();
-    let event_id = event_id.to_string();
-    let timeframe = timeframe.to_string();
-    tokio::task::spawn_blocking(move || {
-        bar_store.upsert(&bar)?;
-        persistence::persist_bar(&db, &timeframe, &bar, &event_id)
-    })
-    .await
-    .context("Bar persistence task failed")??;
-    Ok(())
-}
-
-async fn ensure_bar_store(bar_store: Arc<BarStore>, bar: &Bar) -> Result<()> {
-    let bar_store = Arc::clone(&bar_store);
-    let bar = bar.clone();
-    tokio::task::spawn_blocking(move || {
-        if !bar_store.contains_bar(&bar)? {
-            bar_store.upsert(&bar)?;
-        }
-        Ok::<_, anyhow::Error>(())
-    })
-    .await
-    .context("Bar store repair task failed")??;
+    tokio::task::spawn_blocking(move || bar_store.upsert(&bar))
+        .await
+        .context("Bar store persistence task failed")??;
     Ok(())
 }
 
 async fn persist_event(db: Arc<QuestDb>, timeframe: &str, bar: &Bar, event_id: &str) -> Result<()> {
-    let event_type = format!("bar.{}", bar.timeframe);
-    let event = BarEvent {
-        event_id,
-        event_type: &event_type,
-        timestamp: bar.timestamp,
-        source: &bar.source,
-        symbol: &bar.symbol,
-        timeframe: &bar.timeframe,
-        revision: bar.revision,
-        is_final: true,
-        data: bar,
-    };
-    let payload = serde_json::to_string(&event).context("Failed to encode bar event")?;
-    debug!(
-        event_id,
-        payload_bytes = payload.len(),
-        "Encoded timeframe bar event"
-    );
     let db = Arc::clone(&db);
     let bar = bar.clone();
     let event_id = event_id.to_string();
     let timeframe = timeframe.to_string();
     tokio::task::spawn_blocking(move || {
-        persistence::persist_pending_event(&db, &timeframe, &bar, &event_id, &payload)
+        persistence::persist_pending_event(&db, &timeframe, &bar, &event_id)
     })
     .await
     .context("QuestDB outbox persistence task failed")??;
@@ -637,6 +596,7 @@ async fn persist_event(db: Arc<QuestDb>, timeframe: &str, bar: &Bar, event_id: &
 
 async fn dispatch_pending_events(
     db: Arc<QuestDb>,
+    bar_store: Arc<BarStore>,
     timeframe: &str,
     pulsar: &Pulsar<TokioExecutor>,
     producers: &mut BTreeMap<String, Producer<TokioExecutor>>,
@@ -650,7 +610,14 @@ async fn dispatch_pending_events(
             .context("QuestDB outbox query task failed")??
     };
     for event in pending {
-        send_event(pulsar, producers, pulsar_namespace, &event).await?;
+        let bar_store = Arc::clone(&bar_store);
+        let event_for_payload = event.clone();
+        let payload = tokio::task::spawn_blocking(move || {
+            pending_event_payload(&bar_store, &event_for_payload)
+        })
+        .await
+        .context("Bar event reconstruction task failed")??;
+        send_event(pulsar, producers, pulsar_namespace, &event, &payload).await?;
         let db = Arc::clone(&db);
         let timeframe = timeframe.to_string();
         tokio::task::spawn_blocking(move || {
@@ -662,11 +629,55 @@ async fn dispatch_pending_events(
     Ok(())
 }
 
+fn pending_event_payload(bar_store: &BarStore, event: &PendingEvent) -> Result<String> {
+    anyhow::ensure!(
+        event.time_us % 1_000 == 0,
+        "Outbox event timestamp is not aligned to a Bar millisecond"
+    );
+    let timestamp_ms = u64::try_from(event.time_us)
+        .context("Outbox event timestamp is before the Unix epoch")?
+        / 1_000;
+    let key = BarKey::new(
+        timestamp_ms,
+        event.source.clone(),
+        event.symbol.clone(),
+        event.timeframe.clone(),
+    );
+    let bar = bar_store
+        .read(&key)?
+        .with_context(|| format!("Bar store has no Bar for outbox event {}", event.event_id))?;
+    anyhow::ensure!(
+        bar.revision == event.revision,
+        "Bar store revision {} does not match outbox event {} revision {}",
+        bar.revision,
+        event.event_id,
+        event.revision
+    );
+    anyhow::ensure!(
+        event.event_id == format!("{}:r{}", bar.bar_key, bar.revision),
+        "Outbox event ID does not match its stored Bar"
+    );
+    let event_type = format!("bar.{}", bar.timeframe);
+    let envelope = BarEvent {
+        event_id: &event.event_id,
+        event_type: &event_type,
+        timestamp: bar.timestamp,
+        source: &bar.source,
+        symbol: &bar.symbol,
+        timeframe: &bar.timeframe,
+        revision: bar.revision,
+        is_final: true,
+        data: &bar,
+    };
+    serde_json::to_string(&envelope).context("Failed to encode reconstructed bar event")
+}
+
 async fn send_event(
     pulsar: &Pulsar<TokioExecutor>,
     producers: &mut BTreeMap<String, Producer<TokioExecutor>>,
     namespace: &str,
     event: &PendingEvent,
+    payload: &str,
 ) -> Result<()> {
     send_payload(
         pulsar,
@@ -678,7 +689,7 @@ async fn send_event(
         &event.event_id,
         event.revision,
         true,
-        event.pulsar_payload(),
+        payload,
     )
     .await
 }
@@ -770,10 +781,18 @@ fn bar_topic_name(namespace: &str, source: &str, symbol: &str, timeframe: &str) 
 
 #[cfg(test)]
 mod tests {
-    use super::{bar_topic_name, live_event_id, questdb_connect_string};
+    use super::{bar_topic_name, live_event_id, pending_event_payload, questdb_connect_string};
     use crate::config::Config;
+    use crate::persistence::PendingEvent;
+    use aggregator::bar_store::BarStore;
     use aggregator::model::{Tick, build_bar_for_timeframe};
-    use std::path::PathBuf;
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn questdb_connection_applies_frame_limits_and_keeps_them_above_the_reported_failure() {
@@ -850,5 +869,54 @@ mod tests {
         assert_ne!(live_event_id(&first), format!("{}:r1", first.bar_key));
         assert_ne!(live_event_id(&first), live_event_id(&second));
         assert_eq!(live_event_id(&first), live_event_id(&first));
+    }
+
+    #[test]
+    fn pending_final_event_is_reconstructed_from_the_local_bar_store() {
+        let unique = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "aggregator-outbox-rebuild-{}-{unique}",
+            std::process::id()
+        ));
+        let store = BarStore::open(&directory, 1024 * 1024).unwrap();
+        let bar = build_bar_for_timeframe(
+            &[Tick {
+                time_us: 1_000,
+                source: "binance".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                id: "1".to_string(),
+                price: 100,
+                qty: 1,
+                is_buyer_maker: 0,
+            }],
+            0,
+            "1m",
+            60_000,
+            1,
+            1,
+        )
+        .unwrap();
+        store.write(&bar).unwrap();
+        let event = PendingEvent {
+            time_us: 0,
+            event_id: format!("{}:r{}", bar.bar_key, bar.revision),
+            source: bar.source.clone(),
+            symbol: bar.symbol.clone(),
+            timeframe: bar.timeframe.clone(),
+            revision: bar.revision,
+        };
+
+        let payload = pending_event_payload(&store, &event).unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(decoded["event_id"], event.event_id);
+        assert_eq!(decoded["is_final"], true);
+        assert_eq!(decoded["data"]["timestamp"], "0");
+
+        let mut stale_event = event;
+        stale_event.revision += 1;
+        assert!(pending_event_payload(&store, &stale_event).is_err());
+
+        drop(store);
+        fs::remove_dir_all(directory).unwrap();
     }
 }

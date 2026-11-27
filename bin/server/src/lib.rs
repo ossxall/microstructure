@@ -16,8 +16,6 @@
 pub mod handlers;
 pub mod market;
 pub mod models;
-#[path = "../../shared/payload_codec.rs"]
-pub mod payload_codec;
 pub mod routes;
 pub mod server;
 pub mod state;

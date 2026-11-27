@@ -17,23 +17,12 @@ pub fn bar_store_path(base: &Path, timeframe: &str) -> PathBuf {
     base.with_file_name(name)
 }
 
-pub fn bars_table_name(timeframe: &str) -> Option<&'static str> {
-    match timeframe {
-        "1m" => Some("bars_1m"),
-        "5m" => Some("bars_5m"),
-        "15m" => Some("bars_15m"),
-        "30m" => Some("bars_30m"),
-        "1h" => Some("bars_1h"),
-        "4h" => Some("bars_4h"),
-        "1d" => Some("bars_1d"),
-        _ => None,
-    }
+pub fn is_supported_timeframe(timeframe: &str) -> bool {
+    SUPPORTED_TIMEFRAMES.contains(&timeframe)
 }
 
 pub fn topic_name(namespace: &str, source: &str, symbol: &str, timeframe: &str) -> Option<String> {
-    if bars_table_name(timeframe).is_none()
-        || !is_topic_segment(source)
-        || !is_topic_segment(symbol)
+    if !is_supported_timeframe(timeframe) || !is_topic_segment(source) || !is_topic_segment(symbol)
     {
         return None;
     }
@@ -53,7 +42,7 @@ fn is_topic_segment(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{bar_store_path, bars_table_name, topic_name};
+    use super::{bar_store_path, is_supported_timeframe, topic_name};
     use std::path::Path;
 
     #[test]
@@ -62,7 +51,7 @@ mod tests {
             topic_name("persistent://public/default", "binance", "BTCUSDT", "1m"),
             Some("persistent://public/default/bars-binance-BTCUSDT-1m".to_string())
         );
-        assert_eq!(bars_table_name("5m"), Some("bars_5m"));
+        assert!(is_supported_timeframe("5m"));
     }
 
     #[test]
@@ -71,6 +60,7 @@ mod tests {
             topic_name("persistent://public/default", "binance", "BTC/USDT", "1m"),
             None
         );
+        assert!(!is_supported_timeframe("2m"));
         assert_eq!(
             topic_name("persistent://public/default", "binance", "BTCUSDT", "2m"),
             None

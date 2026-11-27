@@ -22,9 +22,10 @@ The process reads `.env.dev` from this directory; environment variables take
 precedence. The shared `ticks` table must be populated by the merger. Set
 `AGGREGATOR_TIMEFRAME` independently for each worker. If unset, the code uses
 `1m`; copying the sample `.env.example` to `.env.dev` configures this worker for
-`5m`. The `1m` worker uses `bars_1m`, `bar_events` (the event outbox), and
-`aggregator_state`; other timeframes use suffixed names, for example `bars_5m`,
-`bar_events_5m`, and `aggregator_state_5m`.
+`5m`. The `1m` worker uses `bar_events` (the event outbox) and
+`aggregator_state`; other timeframes use suffixed names, for example
+`bar_events_5m` and `aggregator_state_5m`. Finalized Bars are stored in the
+timeframe-specific local BarStore, not in QuestDB `bars_*` tables.
 
 ## Processing and delivery
 
@@ -36,9 +37,9 @@ precedence. The shared `ticks` table must be populated by the merger. Set
   `bars-binance-BTCUSDT-1m`.
 - A bar is created for each `(source, symbol)` with at least one tick. Empty
   windows do not produce bars.
-- The persisted JSON contains the schema from `logic.md` and the ordered
-  `raw_ticks`, retaining every field available in the QuestDB tick row plus
-  `time_us` so consumers can independently verify the checksum.
+- The Bar JSON schema is documented in `logic.md`. Ordered `raw_ticks` retain
+  every field available in the QuestDB tick row plus `time_us`, so consumers can
+  independently verify the checksum.
 - Pulsar events wrap the bar in `data`; `event_id` is an envelope field, not a
   bar field. Consumers should deduplicate by that stable ID.
 - Live events use the same complete `Bar` schema and topic as finalized events.
@@ -46,53 +47,44 @@ precedence. The shared `ticks` table must be populated by the merger. Set
   `is_final: true` for finalized bars. A live event ID is derived from the
   `bar_key`, trade count, and checksum; finalized events retain the
   `{bar_key}:r{revision}` ID. Live snapshots are published directly to Pulsar,
-  not written to the finalized-bars table or durable outbox. They are therefore
+  not written to the finalized BarStore or durable outbox. They are therefore
   best effort; the next poll recomputes the latest snapshot after a restart.
   Subscribers using `InitialPosition::Latest` receive snapshots published after
   subscription, not a previously emitted live snapshot.
 - The live poll re-reads the active window and emits only when the serialized
   `Bar` changes. Since each event contains all `raw_ticks`, frequent snapshots
   can generate substantial query, network, and broker traffic.
-- For finalized bars, the bar and a pending event-outbox row are written to
-  QuestDB before the event is sent, using separate durable QWP flushes. Each individual row must
-  still fit in one QWP frame. The aggregator configures both `max_buf_size` and
-  `sf_max_segment_bytes` to 128 MiB by default. The development QuestDB service
-  in `infra.yaml` sets `http.recv.buffer.size` to 17 MiB, enough for QuestDB
-  10.2's hard 16 MiB QWP frame ceiling after framing overhead, and
-  `http.send.buffer.size` to 64 MiB for query results. Increasing the receive
-  buffer cannot raise that protocol ceiling. Large JSON payloads are gzip
-  compressed and Base64 encoded in QuestDB, then transparently decoded by the
-  aggregator and history API; Pulsar events and API responses remain ordinary
-  JSON. Direct SQL readers of `payload` must decode values prefixed with
-  `gzip+base64:`. Legacy uncompressed rows remain readable. The send buffer
-  must exceed the largest outbox payload; QuestDB's 2 MiB default cannot return
-  a single larger event row. Configure adequate limits in external deployments
-  too. Compose applies these values when the containers start, so recreate
-  QuestDB after changing them. If the process stops between the two writes,
-  rescanning the bucket repairs the missing outbox row. Event delivery is **at
-  least once**; consumers should deduplicate using `event_id`, which is stable
-  for a bar revision.
-- Each timeframe has separate bars, outbox, cursor, ID registry, and
-  store-and-forward paths. The `1m` worker retains the existing table and
-  registry paths for compatibility; other workers use timeframe-suffixed names.
-- Finalized Bars are also stored in the aggregator's append-only rkyv store.
+- The append-only rkyv BarStore is the only source used to persist finalized
+  Bar data going forward. Each record is CRC-checked, 16-byte aligned, and
+  stored in segmented files; `index.json` is atomically checkpointed and any
+  uncheckpointed tail is scanned on startup. Revisions are compared against
+  this store, and replacements append a new record rather than changing mapped
+  bytes.
+- Before publishing a finalized event, the aggregator writes a compact durable
+  outbox row to QuestDB. New rows contain delivery metadata only; their `payload`
+  column is empty, and the event JSON is reconstructed from the matching local
+  BarStore record when dispatched. The Bar record is durably written first, so a
+  restart can recover a pending event. Older pending rows are also reconstructed
+  from BarStore without reading their legacy payload; acknowledging the row
+  clears that payload.
+  Existing published legacy rows and old `bars_*` tables are not automatically
+  deleted. Event delivery is **at least once**; consumers should deduplicate
+  using `event_id`.
+- Each timeframe has a separate outbox, cursor, ID registry, and local BarStore.
+  The `1m` worker retains the existing outbox, cursor, and registry names for
+  compatibility; other workers use timeframe-suffixed names.
+- The BarStore uses an in-memory sorted index with `write`, `upsert`, `read`,
+  `read_last_n`, and a validated zero-copy archived view.
   Records are CRC-checked, 16-byte aligned, and held in segmented files;
   `index.json` is atomically checkpointed and any uncheckpointed tail is scanned
-  on startup. Replacements append a new record instead of changing mapped
-  bytes. The in-memory sorted index supports `write`, `upsert`, `read`,
-  `read_last_n`, and a validated zero-copy archived view. A Bar is written to
-  this store before its QuestDB row; unchanged bars encountered during the
-  normal reprocessing window are added if missing. QuestDB remains the source
-  for tick queries, processing cursors, finalized-bar compatibility, and the
-  durable Pulsar outbox. `/server` opens these same timeframe-specific
-  directories read-only, refreshes the append tail for history requests, and
-  falls back to QuestDB for Bars absent from the local store. If
-  `AGGREGATOR_BAR_STORE_DIR` is overridden, configure the same path for both
-  processes.
-- Bars use `(time, source, symbol)` as the UPSERT key within their timeframe
-  table. If a late tick falls within the rescan window, the aggregator
-  recomputes the affected bar, increments its revision, upserts it, and emits a
-  new event.
+  on startup. `/server` opens the same timeframe-specific directories read-only
+  and refreshes the append tail for history requests; it does not fall back to
+  QuestDB. Configure the same `AGGREGATOR_BAR_STORE_DIR` for both processes and
+  keep it on persistent storage.
+- Bar identity in the local store is `(source, symbol, timeframe, timestamp)`.
+  If a late tick falls within the rescan window, the aggregator recomputes the
+  affected bar, increments its revision, appends the updated record, and emits
+  a new event.
 - The timeframe-specific state table stores the next window to process, so
   empty windows and catch-up after downtime do not lose the processing cursor.
 - Run a single active aggregator instance per timeframe/database: instances for
@@ -100,9 +92,10 @@ precedence. The shared `ticks` table must be populated by the merger. Set
   configured for the same timeframe would still contend as writers.
 
 QuestDB and Pulsar do not share a transaction. The outbox closes the crash gap
-between bar persistence and publishing, but a crash after Pulsar accepts an
-event and before QuestDB records it as published can cause a duplicate event.
-Use the deterministic `event_id` for consumer-side idempotency.
+between local Bar persistence and publishing, but a crash after Pulsar accepts
+an event and before QuestDB records it as published can cause a duplicate event.
+The local BarStore must remain available while events are pending. Use the
+deterministic `event_id` for consumer-side idempotency.
 
 ## Metric conventions and source limitations
 
