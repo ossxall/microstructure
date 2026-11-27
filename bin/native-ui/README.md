@@ -49,3 +49,41 @@ El botón «Logs» abre el registro de estado de la aplicación: configuración 
 endpoints, ciclo de vida de tabs/Charts, conexiones y resultados/errores de
 history. Mantiene un máximo de 500 entradas, agrupa mensajes repetidos y no
 registra cada evento live.
+
+
+                 ┌─────────────────────────────┐
+                 │      History HTTP / WS      │
+                 └──────────────┬──────────────┘
+                                │ CalculationInput
+                                ▼
+                 ┌─────────────────────────────┐
+                 │ Worker de mercado          │
+                 │ por tab/feed               │
+                 │ parsea, reconcilia y       │
+                 │ proyecta las Bars          │
+                 └────────┬─────────────┬────┘
+                          │             │
+       watch: Arc<ChartSnapshot>        │ señal sync (capacidad 1)
+       con generation                   │ se coalescen avisos
+                          │             ▼
+                          │    ┌────────────────────────────┐
+                          │    │ Worker de indicadores       │◄──── Chart plan
+                          │    │ por tab                     │      (ChartKind
+                          │    │ lee el Arc más reciente     │       activos)
+                          │    │ calcula EMA 55/200          │
+                          │    └──────────────┬─────────────┘
+                          │                   │
+                          │       watch: Arc<IndicatorSnapshot>
+                          │       con source_generation
+                          │                   │
+                          ▼                   ▼
+                 ┌─────────────────────────────┐
+                 │ ChartApp / capa de render   │
+                 │ lee ambos snapshots         │
+                 │ comprueba las generaciones │
+                 └──────────────┬──────────────┘
+                                │
+                                ▼
+                 ┌─────────────────────────────┐
+                 │ egui_plot                   │
+                 │ dibuja velas, volumen y EMA │
