@@ -1,5 +1,5 @@
 use eframe::egui::{self, Color32, Stroke};
-use egui_plot::{Line, Plot, PlotPoints, Polygon};
+use egui_plot::{Axis, Line, Plot, PlotMemory, PlotPoints, Polygon};
 
 use crate::{
     app_log::AppLogger,
@@ -52,6 +52,11 @@ pub fn show(
     let (all_x_min, all_x_max) = shared::x_bounds(bars, interval);
     let x_link = egui::Id::NULL.with(("ohlcv-time-axis", feed_id));
     let half_bar_width = interval * 0.24;
+    let inverted_axis_zoom = if fit_to_content {
+        None
+    } else {
+        reverse_axis_zoom_drag(ui, feed_id, chart_id)
+    };
 
     let (x_min, x_max) = if fit_to_content {
         (all_x_min, all_x_max)
@@ -70,12 +75,19 @@ pub fn show(
         .allow_zoom(egui::Vec2b::new(true, true))
         .allow_drag(egui::Vec2b::new(true, true))
         .allow_scroll(egui::Vec2b::new(true, true))
-        .allow_axis_zoom_drag(egui::Vec2b::new(true, true))
+        .allow_axis_zoom_drag(false)
         .allow_boxed_zoom(false);
     if fit_to_content {
         plot = plot.reset();
     }
     plot.show(ui, |plot_ui| {
+        if let Some((axis, bounds)) = inverted_axis_zoom {
+            match axis {
+                Axis::X => plot_ui.set_plot_bounds_x(bounds.range_x()),
+                Axis::Y => plot_ui.set_plot_bounds_y(bounds.range_y()),
+            }
+        }
+
         let bounds = plot_ui.plot_bounds();
         let x_bounds = bounds.range_x();
         let visible_bars = bars
@@ -191,4 +203,87 @@ pub fn show(
             );
         }
     });
+}
+
+fn inverted_axis_zoom_factor(delta: f32) -> f32 {
+    1.0 + (-0.02 * delta).clamp(-1.0, 1.0)
+}
+
+/// `egui_plot` doesn't expose an option to reverse axis-drag zoom, so handle
+/// the two scale hit areas with the same behavior and an inverted delta.
+fn reverse_axis_zoom_drag(
+    ui: &mut egui::Ui,
+    feed_id: u64,
+    chart_id: u64,
+) -> Option<(Axis, egui_plot::PlotBounds)> {
+    let plot_id = ui.make_persistent_id(egui::IdSalt::new(("ohlcv-main", feed_id, chart_id)));
+    let previous_transform = PlotMemory::load(ui.ctx(), plot_id)?.transform();
+    let plot_rect = *previous_transform.frame();
+    let available_rect = ui.available_rect_before_wrap();
+    let chart_rect = egui::Rect::from_min_size(
+        available_rect.min,
+        egui::vec2(available_rect.width(), ui.available_height().max(120.0)),
+    );
+    let x_axis_rect = egui::Rect::from_min_max(
+        egui::pos2(plot_rect.left(), plot_rect.bottom()),
+        egui::pos2(plot_rect.right(), chart_rect.bottom()),
+    );
+    let y_axis_rect = egui::Rect::from_min_max(
+        chart_rect.left_top(),
+        egui::pos2(plot_rect.left(), plot_rect.bottom()),
+    );
+    let x_axis_response = ui
+        .interact(
+            x_axis_rect,
+            ui.make_persistent_id(("ohlcv-time-axis-zoom", feed_id, chart_id)),
+            egui::Sense::drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let y_axis_response = ui
+        .interact(
+            y_axis_rect,
+            ui.make_persistent_id(("ohlcv-price-axis-zoom", feed_id, chart_id)),
+            egui::Sense::drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let press_origin = ui.input(|input| input.pointer.press_origin())?;
+
+    let (axis, delta, center) = if x_axis_response.dragged_by(egui::PointerButton::Primary) {
+        (
+            Axis::X,
+            x_axis_response.drag_delta().x,
+            egui::pos2(press_origin.x, plot_rect.center().y),
+        )
+    } else if y_axis_response.dragged_by(egui::PointerButton::Primary) {
+        (
+            Axis::Y,
+            y_axis_response.drag_delta().y,
+            egui::pos2(plot_rect.center().x, press_origin.y),
+        )
+    } else {
+        return None;
+    };
+    if delta == 0.0 {
+        return None;
+    }
+
+    let zoom_factor = inverted_axis_zoom_factor(delta);
+    let zoom = match axis {
+        Axis::X => egui::vec2(zoom_factor, 1.0),
+        Axis::Y => egui::vec2(1.0, zoom_factor),
+    };
+    let mut transform = previous_transform;
+    transform.zoom(zoom, center);
+    Some((axis, *transform.bounds()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inverted_axis_zoom_factor;
+
+    #[test]
+    fn axis_drag_zoom_direction_is_inverted() {
+        assert!(inverted_axis_zoom_factor(10.0) < 1.0);
+        assert!(inverted_axis_zoom_factor(-10.0) > 1.0);
+    }
 }
