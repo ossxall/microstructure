@@ -608,15 +608,14 @@ fn chart_window_geometry(
 ) -> (egui::Pos2, egui::Vec2, egui::Vec2) {
     let columns = (chart_count.max(1) as f32).sqrt().ceil() as usize;
     let rows = chart_count.max(1).div_ceil(columns);
-    let gap = 12.0;
-    let width = ((chart_area.width() - gap * (columns + 1) as f32) / columns as f32).max(1.0);
-    let height = ((chart_area.height() - gap * (rows + 1) as f32) / rows as f32).max(1.0);
+    let width = (chart_area.width() / columns as f32).max(1.0);
+    let height = (chart_area.height() / rows as f32).max(1.0);
     let column = index % columns;
     let row = index / columns;
     let size = egui::vec2(width, height).min(chart_area.size());
     let position = egui::pos2(
-        chart_area.left() + gap + column as f32 * (width + gap),
-        chart_area.top() + gap + row as f32 * (height + gap),
+        chart_area.left() + column as f32 * width,
+        chart_area.top() + row as f32 * height,
     );
     let min_size = egui::vec2((size.x * 0.55).min(260.0), (size.y * 0.55).min(180.0))
         .max(egui::vec2(1.0, 1.0));
@@ -651,6 +650,21 @@ mod tests {
             let window = Rect::from_min_size(position, size);
             assert!(area.contains_rect(window));
         }
+    }
+
+    #[test]
+    fn two_chart_windows_fill_the_tab_chart_area() {
+        let area = Rect::from_min_max(pos2(20.0, 40.0), pos2(1220.0, 740.0));
+        let (left_pos, left_size, _) = chart_window_geometry(area, 0, 2);
+        let (right_pos, right_size, _) = chart_window_geometry(area, 1, 2);
+        let left = Rect::from_min_size(left_pos, left_size);
+        let right = Rect::from_min_size(right_pos, right_size);
+
+        assert_eq!(left.min, area.min);
+        assert_eq!(right.min.x, left.max.x);
+        assert_eq!(left.height(), area.height());
+        assert_eq!(right.height(), area.height());
+        assert_eq!(right.max, area.max);
     }
 
     #[test]
