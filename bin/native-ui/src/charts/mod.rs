@@ -11,10 +11,18 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChartDropPosition {
+    Above,
+    Below,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChartDrop {
     pub dragged_chart_id: u64,
     pub target_chart_id: u64,
-    pub after: bool,
+    pub position: ChartDropPosition,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -110,7 +118,7 @@ pub fn show(
             );
             let _ = drag_handle
                 .response
-                .on_hover_text("Arrastrar para reordenar Charts en esta pestaña");
+                .on_hover_text("Arrastrar para reordenar o poner Charts lado a lado");
             ui.label(
                 RichText::new(chart.kind.title())
                     .color(MUTED)
@@ -132,16 +140,20 @@ pub fn show(
             .render(ui, chart.id, feed_id, timeframe, snapshot);
     });
 
-    let pointer_y = ui.input(|input| input.pointer.interact_pos().map(|pos| pos.y));
+    let pointer_pos = ui.input(|input| input.pointer.interact_pos());
     let hovered_payload = drop_zone.response.dnd_hover_payload::<u64>();
-    if let (Some(dragged_chart_id), Some(pointer_y)) = (&hovered_payload, pointer_y)
+    let hovered_position = pointer_pos.map(|pos| drop_position(drop_zone.response.rect, pos));
+    if let (Some(dragged_chart_id), Some(position)) = (&hovered_payload, hovered_position)
         && **dragged_chart_id != chart.id
     {
         let rect = drop_zone.response.rect;
-        let after = pointer_y >= rect.center().y;
-        let marker_y = if after { rect.bottom() } else { rect.top() };
-        ui.painter()
-            .hline(rect.x_range(), marker_y, egui::Stroke::new(2.0, LIME));
+        let stroke = egui::Stroke::new(2.0, LIME);
+        match position {
+            ChartDropPosition::Above => ui.painter().hline(rect.x_range(), rect.top(), stroke),
+            ChartDropPosition::Below => ui.painter().hline(rect.x_range(), rect.bottom(), stroke),
+            ChartDropPosition::Left => ui.painter().vline(rect.left(), rect.y_range(), stroke),
+            ChartDropPosition::Right => ui.painter().vline(rect.right(), rect.y_range(), stroke),
+        };
     }
 
     let drop = dropped_payload.and_then(|dragged_chart_id| {
@@ -151,8 +163,9 @@ pub fn show(
         Some(ChartDrop {
             dragged_chart_id: *dragged_chart_id,
             target_chart_id: chart.id,
-            after: pointer_y
-                .is_some_and(|pointer_y| pointer_y >= drop_zone.response.rect.center().y),
+            position: pointer_pos
+                .map(|pos| drop_position(drop_zone.response.rect, pos))
+                .unwrap_or(ChartDropPosition::Below),
         })
     });
 
@@ -160,10 +173,50 @@ pub fn show(
     ChartResponse { close, drop }
 }
 
+fn drop_position(rect: egui::Rect, pointer: egui::Pos2) -> ChartDropPosition {
+    let horizontal_offset = (pointer.x - rect.center().x) / (rect.width() * 0.5).max(f32::EPSILON);
+    let vertical_offset = (pointer.y - rect.center().y) / (rect.height() * 0.5).max(f32::EPSILON);
+
+    if horizontal_offset.abs() > vertical_offset.abs() {
+        if horizontal_offset < 0.0 {
+            ChartDropPosition::Left
+        } else {
+            ChartDropPosition::Right
+        }
+    } else if vertical_offset < 0.0 {
+        ChartDropPosition::Above
+    } else {
+        ChartDropPosition::Below
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ChartKind;
+    use super::{ChartDropPosition, ChartKind, drop_position};
     use crate::market::BarFields;
+    use eframe::egui::{Pos2, Rect, pos2};
+
+    #[test]
+    fn drop_position_uses_the_nearest_edge_of_the_chart() {
+        let rect = Rect::from_min_max(Pos2::ZERO, pos2(100.0, 200.0));
+
+        assert_eq!(
+            drop_position(rect, pos2(5.0, 100.0)),
+            ChartDropPosition::Left
+        );
+        assert_eq!(
+            drop_position(rect, pos2(95.0, 100.0)),
+            ChartDropPosition::Right
+        );
+        assert_eq!(
+            drop_position(rect, pos2(50.0, 5.0)),
+            ChartDropPosition::Above
+        );
+        assert_eq!(
+            drop_position(rect, pos2(50.0, 195.0)),
+            ChartDropPosition::Below
+        );
+    }
 
     #[test]
     fn chart_data_requirements_are_declared_by_each_chart_module() {
