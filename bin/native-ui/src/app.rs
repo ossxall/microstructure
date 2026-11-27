@@ -40,6 +40,7 @@ pub struct ChartApp {
     egui_ctx: egui::Context,
     logger: AppLogger,
     logs_open: bool,
+    info_bar_visible: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -66,6 +67,7 @@ impl ChartApp {
             egui_ctx: cc.egui_ctx.clone(),
             logger,
             logs_open: false,
+            info_bar_visible: false,
         }
     }
 
@@ -73,6 +75,7 @@ impl ChartApp {
         let mut activate_tab = None;
         let mut close_tab = None;
         let mut add_tab = None;
+        let mut toggle_info_bar = false;
 
         egui::Frame::new()
             .fill(PANEL)
@@ -93,6 +96,13 @@ impl ChartApp {
                     })
                     .response
                     .on_hover_text("Añadir símbolo y temporalidad");
+                    if ui
+                        .selectable_label(self.info_bar_visible, "Info")
+                        .on_hover_text("Mostrar u ocultar la barra de información")
+                        .clicked()
+                    {
+                        toggle_info_bar = true;
+                    }
                     if ui.button("Logs").on_hover_text("Estado y logs").clicked() {
                         self.logs_open = true;
                         self.logger.set_dialog_open(true);
@@ -132,6 +142,20 @@ impl ChartApp {
                         });
                 });
             });
+
+        if toggle_info_bar {
+            self.info_bar_visible = !self.info_bar_visible;
+            let feed = self
+                .tabs
+                .get(self.active_tab)
+                .map(|tab| feed_label(&tab.key));
+            let message = if self.info_bar_visible {
+                "Barra de información activada"
+            } else {
+                "Barra de información ocultada para ampliar el espacio de los charts"
+            };
+            self.logger.info(feed, message);
+        }
 
         if let Some(index) = close_tab {
             self.close_tab(index);
@@ -377,6 +401,7 @@ impl ChartApp {
     fn show_tab_content(
         ui: &mut egui::Ui,
         tab: &ChartTab,
+        info_bar_visible: bool,
         action: &mut Option<TabAction>,
     ) -> egui::Rect {
         let snapshot = tab.snapshot_rx.borrow().clone();
@@ -390,73 +415,75 @@ impl ChartApp {
             FeedStatus::Error(error) => format!("Error: {error}"),
         };
 
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new(&tab.key.symbol).strong().color(TEXT));
-            ui.label(
-                RichText::new(&tab.key.timeframe)
-                    .strong()
-                    .color(LIME)
-                    .background_color(Color32::from_rgb(22, 48, 34)),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let status_color = if matches!(&snapshot.status, FeedStatus::Live) {
-                    LIME
-                } else {
-                    MUTED
-                };
+        if info_bar_visible {
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new(&tab.key.symbol).strong().color(TEXT));
                 ui.label(
-                    RichText::new(format!("● {status_text}"))
-                        .color(status_color)
-                        .small(),
+                    RichText::new(&tab.key.timeframe)
+                        .strong()
+                        .color(LIME)
+                        .background_color(Color32::from_rgb(22, 48, 34)),
                 );
-                ui.label(
-                    RichText::new(format!("{} Bars completas", snapshot.full_bars.len()))
-                        .color(MUTED)
-                        .small(),
-                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let status_color = if matches!(&snapshot.status, FeedStatus::Live) {
+                        LIME
+                    } else {
+                        MUTED
+                    };
+                    ui.label(
+                        RichText::new(format!("● {status_text}"))
+                            .color(status_color)
+                            .small(),
+                    );
+                    ui.label(
+                        RichText::new(format!("{} Bars completas", snapshot.full_bars.len()))
+                            .color(MUTED)
+                            .small(),
+                    );
+                });
             });
-        });
+
+            ui.add_space(4.0);
+            if let Some(last) = last {
+                let change_color = if last.is_bullish() { LIME } else { TEXT };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("O").color(MUTED).small());
+                    ui.label(
+                        RichText::new(format!("{:.*}", precision, last.open))
+                            .color(TEXT)
+                            .monospace(),
+                    );
+                    ui.label(RichText::new("H").color(MUTED).small());
+                    ui.label(
+                        RichText::new(format!("{:.*}", precision, last.high))
+                            .color(TEXT)
+                            .monospace(),
+                    );
+                    ui.label(RichText::new("L").color(MUTED).small());
+                    ui.label(
+                        RichText::new(format!("{:.*}", precision, last.low))
+                            .color(TEXT)
+                            .monospace(),
+                    );
+                    ui.label(RichText::new("C").color(MUTED).small());
+                    ui.label(
+                        RichText::new(format!("{:.*}", precision, last.close))
+                            .color(change_color)
+                            .monospace()
+                            .strong(),
+                    );
+                    ui.label(RichText::new("VOL").color(MUTED).small());
+                    ui.label(
+                        RichText::new(format!("{:.0}", last.volume))
+                            .color(TEXT)
+                            .monospace(),
+                    );
+                });
+            }
+        }
 
         if let Some(error) = &snapshot.history_error {
             ui.colored_label(Color32::LIGHT_RED, format!("History: {error}"));
-        }
-
-        ui.add_space(4.0);
-        if let Some(last) = last {
-            let change_color = if last.is_bullish() { LIME } else { TEXT };
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("O").color(MUTED).small());
-                ui.label(
-                    RichText::new(format!("{:.*}", precision, last.open))
-                        .color(TEXT)
-                        .monospace(),
-                );
-                ui.label(RichText::new("H").color(MUTED).small());
-                ui.label(
-                    RichText::new(format!("{:.*}", precision, last.high))
-                        .color(TEXT)
-                        .monospace(),
-                );
-                ui.label(RichText::new("L").color(MUTED).small());
-                ui.label(
-                    RichText::new(format!("{:.*}", precision, last.low))
-                        .color(TEXT)
-                        .monospace(),
-                );
-                ui.label(RichText::new("C").color(MUTED).small());
-                ui.label(
-                    RichText::new(format!("{:.*}", precision, last.close))
-                        .color(change_color)
-                        .monospace()
-                        .strong(),
-                );
-                ui.label(RichText::new("VOL").color(MUTED).small());
-                ui.label(
-                    RichText::new(format!("{:.0}", last.volume))
-                        .color(TEXT)
-                        .monospace(),
-                );
-            });
         }
 
         ui.horizontal(|ui| {
@@ -478,29 +505,9 @@ impl ChartApp {
         ui.separator();
         ui.add_space(4.0);
         let available = ui.available_rect_before_wrap();
-        let footer_height = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-        let chart_area = egui::Rect::from_min_max(
-            available.min,
-            egui::pos2(
-                available.max.x,
-                (available.max.y - footer_height).max(available.min.y),
-            ),
-        );
+        let chart_area = available;
         ui.allocate_rect(chart_area, egui::Sense::hover());
 
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("●").color(LIME));
-            ui.label(RichText::new("Alcista").color(MUTED).small());
-            ui.label(RichText::new("●").color(TEXT));
-            ui.label(RichText::new("Bajista").color(MUTED).small());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new("OHLCV calculado desde las Bars completas")
-                        .color(MUTED)
-                        .small(),
-                );
-            });
-        });
         chart_area
     }
 }
@@ -517,7 +524,12 @@ impl eframe::App for ChartApp {
                 ui.add_space(8.0);
 
                 if let Some(tab) = self.tabs.get(self.active_tab) {
-                    chart_area = Some(Self::show_tab_content(ui, tab, &mut action));
+                    chart_area = Some(Self::show_tab_content(
+                        ui,
+                        tab,
+                        self.info_bar_visible,
+                        &mut action,
+                    ));
                 } else {
                     ui.add_space(48.0);
                     ui.vertical_centered(|ui| {
