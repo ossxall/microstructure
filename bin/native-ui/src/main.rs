@@ -40,7 +40,7 @@ impl ChartApp {
         set_green_dark_theme(&cc.egui_ctx);
 
         Self {
-            tabs: vec![make_tab("BTCUSDT", "5m"), make_tab("ADAUSDT", "1m")],
+            tabs: Vec::new(),
             active_tab: 0,
         }
     }
@@ -92,11 +92,10 @@ impl ChartApp {
                                         activate_tab = Some(index);
                                     }
 
-                                    if self.tabs.len() > 1
-                                        && ui
-                                            .small_button("×")
-                                            .on_hover_text("Cerrar pestaña")
-                                            .clicked()
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("Cerrar pestaña")
+                                        .clicked()
                                     {
                                         close_tab = Some(index);
                                     }
@@ -108,7 +107,9 @@ impl ChartApp {
 
         if let Some(index) = close_tab {
             self.tabs.remove(index);
-            if self.active_tab > index {
+            if self.tabs.is_empty() {
+                self.active_tab = 0;
+            } else if self.active_tab > index {
                 self.active_tab -= 1;
             } else if self.active_tab == index {
                 self.active_tab = self.active_tab.min(self.tabs.len() - 1);
@@ -240,101 +241,113 @@ impl eframe::App for ChartApp {
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(14.0))
             .show(ui, |ui| {
                 self.show_tabs(ui);
-                ui.add_space(8.0);
-
-                let tab = &self.tabs[self.active_tab];
-                let last = tab.candles.last().copied().unwrap_or(Candle {
-                    open: 0.0,
-                    high: 0.0,
-                    low: 0.0,
-                    close: 0.0,
-                    volume: 0.0,
-                });
-                let change_color = if last.is_bullish() { LIME } else { TEXT };
-                let precision = if tab.symbol == "ADAUSDT" { 4 } else { 2 };
-
-                ui.horizontal(|ui| {
-                    ui.heading(RichText::new(&tab.symbol).strong().color(TEXT));
-                    ui.label(
-                        RichText::new(&tab.timeframe)
-                            .strong()
-                            .color(LIME)
-                            .background_color(Color32::from_rgb(22, 48, 34)),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("● MERCADO ABIERTO").color(LIME).small());
-                        ui.label(RichText::new("CRYPTO · Demo").color(MUTED).small());
-                    });
-                });
-
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("O").color(MUTED).small());
-                    ui.label(
-                        RichText::new(format!("{:.*}", precision, last.open))
-                            .color(TEXT)
-                            .monospace(),
-                    );
-                    ui.label(RichText::new("H").color(MUTED).small());
-                    ui.label(
-                        RichText::new(format!("{:.*}", precision, last.high))
-                            .color(TEXT)
-                            .monospace(),
-                    );
-                    ui.label(RichText::new("L").color(MUTED).small());
-                    ui.label(
-                        RichText::new(format!("{:.*}", precision, last.low))
-                            .color(TEXT)
-                            .monospace(),
-                    );
-                    ui.label(RichText::new("C").color(MUTED).small());
-                    ui.label(
-                        RichText::new(format!("{:.*}", precision, last.close))
-                            .color(change_color)
-                            .monospace()
-                            .strong(),
-                    );
-                    ui.label(RichText::new("VOL").color(MUTED).small());
-                    ui.label(
-                        RichText::new(format!("{:.0}", last.volume))
-                            .color(TEXT)
-                            .monospace(),
-                    );
-                });
-
-                ui.add_space(8.0);
                 ui.separator();
-                ui.add_space(4.0);
+                ui.add_space(8.0);
 
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .corner_radius(egui::CornerRadius::same(5))
-                    .inner_margin(egui::Margin::same(6))
-                    .show(ui, |ui| {
-                        self.show_price_chart(ui, tab);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("VOLUMEN").color(MUTED).small().strong());
-                            ui.label(RichText::new("·  ticks").color(MUTED).small());
+                if let Some(tab) = self.tabs.get(self.active_tab) {
+                    let last = tab.candles.last().copied().unwrap_or(Candle {
+                        open: 0.0,
+                        high: 0.0,
+                        low: 0.0,
+                        close: 0.0,
+                        volume: 0.0,
+                    });
+                    let change_color = if last.is_bullish() { LIME } else { TEXT };
+                    let precision = if tab.symbol == "ADAUSDT" { 4 } else { 2 };
+
+                    ui.horizontal(|ui| {
+                        ui.heading(RichText::new(&tab.symbol).strong().color(TEXT));
+                        ui.label(
+                            RichText::new(&tab.timeframe)
+                                .strong()
+                                .color(LIME)
+                                .background_color(Color32::from_rgb(22, 48, 34)),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new("● MERCADO ABIERTO").color(LIME).small());
+                            ui.label(RichText::new("CRYPTO · Demo").color(MUTED).small());
                         });
-                        self.show_volume_chart(ui, tab);
                     });
 
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("●").color(LIME));
-                    ui.label(RichText::new("Alcista").color(MUTED).small());
-                    ui.label(RichText::new("●").color(TEXT));
-                    ui.label(RichText::new("Bajista").color(MUTED).small());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("O").color(MUTED).small());
                         ui.label(
-                            RichText::new(
-                                "Datos de ejemplo · desplaza para zoom · arrastra para mover",
-                            )
-                            .color(MUTED)
-                            .small(),
+                            RichText::new(format!("{:.*}", precision, last.open))
+                                .color(TEXT)
+                                .monospace(),
+                        );
+                        ui.label(RichText::new("H").color(MUTED).small());
+                        ui.label(
+                            RichText::new(format!("{:.*}", precision, last.high))
+                                .color(TEXT)
+                                .monospace(),
+                        );
+                        ui.label(RichText::new("L").color(MUTED).small());
+                        ui.label(
+                            RichText::new(format!("{:.*}", precision, last.low))
+                                .color(TEXT)
+                                .monospace(),
+                        );
+                        ui.label(RichText::new("C").color(MUTED).small());
+                        ui.label(
+                            RichText::new(format!("{:.*}", precision, last.close))
+                                .color(change_color)
+                                .monospace()
+                                .strong(),
+                        );
+                        ui.label(RichText::new("VOL").color(MUTED).small());
+                        ui.label(
+                            RichText::new(format!("{:.0}", last.volume))
+                                .color(TEXT)
+                                .monospace(),
                         );
                     });
-                });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    egui::Frame::new()
+                        .fill(PANEL)
+                        .corner_radius(egui::CornerRadius::same(5))
+                        .inner_margin(egui::Margin::same(6))
+                        .show(ui, |ui| {
+                            self.show_price_chart(ui, tab);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("VOLUMEN").color(MUTED).small().strong());
+                                ui.label(RichText::new("·  ticks").color(MUTED).small());
+                            });
+                            self.show_volume_chart(ui, tab);
+                        });
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("●").color(LIME));
+                        ui.label(RichText::new("Alcista").color(MUTED).small());
+                        ui.label(RichText::new("●").color(TEXT));
+                        ui.label(RichText::new("Bajista").color(MUTED).small());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(
+                                    "Datos de ejemplo · desplaza para zoom · arrastra para mover",
+                                )
+                                .color(MUTED)
+                                .small(),
+                            );
+                        });
+                    });
+                } else {
+                    ui.add_space(48.0);
+                    ui.vertical_centered(|ui| {
+                        ui.heading(RichText::new("Sin gráficos abiertos").color(TEXT));
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("Usa «+» para abrir un símbolo y una temporalidad.")
+                                .color(MUTED),
+                        );
+                    });
+                }
             });
     }
 }
