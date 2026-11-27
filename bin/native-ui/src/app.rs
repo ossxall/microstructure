@@ -3,6 +3,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     mpsc,
 };
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Color32, RichText};
 use tokio::sync::watch;
@@ -542,6 +543,43 @@ impl ChartApp {
             if ui.button("Cargar 50 Bars más").clicked() {
                 *action = Some(TabAction::LoadMoreHistory);
             }
+            let countdown = snapshot.full_bars.last().and_then(|bar| {
+                bar_close_countdown_seconds(
+                    bar.timestamp_ms,
+                    &tab.key.timeframe,
+                    unix_time_ms(),
+                )
+            });
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    let countdown_text = countdown
+                        .map(format_countdown)
+                        .unwrap_or_else(|| "--:--".to_string());
+                    let countdown_color = if countdown.is_some_and(|seconds| seconds > 0) {
+                        LIME
+                    } else {
+                        MUTED
+                    };
+                    let response = ui.label(
+                        RichText::new(countdown_text)
+                            .color(countdown_color)
+                            .monospace()
+                            .strong(),
+                    );
+                    if let Some(seconds) = countdown {
+                        response.on_hover_text(
+                            "Tiempo restante según el timestamp de la última Bar y el timeframe de esta tab.",
+                        );
+                        if seconds > 0 {
+                            ui.ctx().request_repaint_after(Duration::from_secs(1));
+                        }
+                    } else {
+                        response.on_hover_text("Esperando la última Bar.");
+                    }
+                    ui.label(RichText::new("Cierre Bar").color(MUTED).small());
+                },
+            );
         });
 
         ui.separator();
@@ -634,6 +672,44 @@ fn feed_label(key: &FeedKey) -> String {
     format!("{}/{}/{}", key.source, key.symbol, key.timeframe)
 }
 
+fn timeframe_millis(timeframe: &str) -> Option<u64> {
+    match timeframe {
+        "1m" => Some(60_000),
+        "5m" => Some(300_000),
+        "15m" => Some(900_000),
+        "30m" => Some(1_800_000),
+        "1h" => Some(3_600_000),
+        "4h" => Some(14_400_000),
+        "1d" => Some(86_400_000),
+        _ => None,
+    }
+}
+
+fn bar_close_countdown_seconds(bar_timestamp_ms: u64, timeframe: &str, now_ms: u64) -> Option<u64> {
+    let interval_ms = timeframe_millis(timeframe)?;
+    let close_timestamp_ms = bar_timestamp_ms.saturating_add(interval_ms);
+    Some(close_timestamp_ms.saturating_sub(now_ms).div_ceil(1_000))
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn format_countdown(seconds: u64) -> String {
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{:02}:{seconds:02}", minutes)
+    }
+}
+
 fn add_chart_to_layout(chart_layout: &mut ChartLayout, chart: Chart) {
     chart_layout.push(chart);
 }
@@ -675,7 +751,8 @@ mod tests {
     use crate::charts::{Chart, ChartKind};
 
     use super::{
-        ChartLayout, add_chart_to_layout, chart_window_geometry, remove_chart_from_layout,
+        ChartLayout, add_chart_to_layout, bar_close_countdown_seconds, chart_window_geometry,
+        format_countdown, remove_chart_from_layout,
     };
     use eframe::egui::{Rect, pos2};
 
@@ -733,5 +810,27 @@ mod tests {
 
         assert!(!remove_chart_from_layout(&mut charts, 1));
         assert_eq!(ids(&charts), [1]);
+    }
+
+    #[test]
+    fn bar_close_countdown_uses_the_tab_timeframe_and_last_bar_timestamp() {
+        assert_eq!(
+            bar_close_countdown_seconds(1_000_000, "5m", 1_004_000),
+            Some(296)
+        );
+        assert_eq!(
+            bar_close_countdown_seconds(1_000_000, "5m", 1_300_000),
+            Some(0)
+        );
+        assert_eq!(
+            bar_close_countdown_seconds(1_000_000, "unknown", 1_004_000),
+            None
+        );
+    }
+
+    #[test]
+    fn countdown_formats_minutes_and_hours() {
+        assert_eq!(format_countdown(65), "01:05");
+        assert_eq!(format_countdown(3_661), "01:01:01");
     }
 }
