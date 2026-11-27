@@ -110,6 +110,7 @@ mod tests {
         let (plan_tx, plan_rx) = watch::channel(Arc::<[ChartKind]>::from([
             ChartKind::Main,
             ChartKind::Momentum,
+            ChartKind::BidAskFlow,
         ]));
         let (signal_tx, signal_rx) = mpsc::sync_channel(1);
         let (indicator_tx, indicator_rx) = watch::channel(Arc::new(IndicatorSnapshot::default()));
@@ -141,6 +142,10 @@ mod tests {
         assert!(matches!(
             result.charts.get(&ChartKind::Momentum),
             Some(ChartIndicatorData::Momentum(_))
+        ));
+        assert!(matches!(
+            result.charts.get(&ChartKind::BidAskFlow),
+            Some(ChartIndicatorData::BidAskFlow(_))
         ));
     }
 }

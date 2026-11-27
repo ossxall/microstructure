@@ -1,3 +1,4 @@
+pub mod bid_ask_flow;
 mod indicator_worker;
 pub mod momentum;
 mod shared;
@@ -22,6 +23,22 @@ pub struct MainIndicatorData {
     pub ema_200: Arc<[[f64; 2]]>,
     pub delta_profile: Arc<[DeltaProfileLevel]>,
     pub delta_profile_tick_size: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BidAskFlowCandle {
+    pub time: f64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub ask_qty: f64,
+    pub bid_qty: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BidAskFlowData {
+    pub candles: Arc<[BidAskFlowCandle]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,6 +77,7 @@ impl Default for MainIndicatorData {
 pub enum ChartIndicatorData {
     Main(MainIndicatorData),
     Momentum(MomentumIndicatorData),
+    BidAskFlow(BidAskFlowData),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -72,16 +90,18 @@ pub struct IndicatorSnapshot {
 pub enum ChartKind {
     Main,
     Momentum,
+    BidAskFlow,
 }
 
 impl ChartKind {
     /// The chart catalog is shared by every feed tab.
-    pub const ALL: [Self; 2] = [Self::Main, Self::Momentum];
+    pub const ALL: [Self; 3] = [Self::Main, Self::Momentum, Self::BidAskFlow];
 
     pub const fn title(self) -> &'static str {
         match self {
             Self::Main => main::TITLE,
             Self::Momentum => momentum::TITLE,
+            Self::BidAskFlow => bid_ask_flow::TITLE,
         }
     }
 
@@ -89,6 +109,7 @@ impl ChartKind {
         match self {
             Self::Main => main::MENU_LABEL,
             Self::Momentum => momentum::MENU_LABEL,
+            Self::BidAskFlow => bid_ask_flow::MENU_LABEL,
         }
     }
 
@@ -96,6 +117,7 @@ impl ChartKind {
         match self {
             Self::Main => main::data_request(history_limit),
             Self::Momentum => momentum::data_request(history_limit),
+            Self::BidAskFlow => bid_ask_flow::data_request(history_limit),
         }
     }
 
@@ -104,6 +126,9 @@ impl ChartKind {
             Self::Main => ChartIndicatorData::Main(main::calculate_indicators(snapshot, timeframe)),
             Self::Momentum => {
                 ChartIndicatorData::Momentum(momentum::calculate_indicators(snapshot))
+            }
+            Self::BidAskFlow => {
+                ChartIndicatorData::BidAskFlow(bid_ask_flow::calculate_indicators(snapshot))
             }
         }
     }
@@ -125,6 +150,9 @@ impl ChartKind {
             ),
             Self::Momentum => {
                 momentum::show(ui, chart_id, feed_id, feed, timeframe, snapshot, indicators)
+            }
+            Self::BidAskFlow => {
+                bid_ask_flow::show(ui, chart_id, feed_id, timeframe, snapshot, indicators)
             }
         }
     }
@@ -224,5 +252,14 @@ mod tests {
         assert_eq!(request.history_limit, 31);
         assert!(request.live);
         assert!(request.fields.complete_bar);
+    }
+
+    #[test]
+    fn bid_ask_flow_chart_requests_raw_ticks() {
+        let request = ChartKind::BidAskFlow.data_request(10);
+
+        assert_eq!(request.history_limit, 10);
+        assert!(request.live);
+        assert!(request.fields.raw_ticks);
     }
 }
