@@ -3,7 +3,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use questdb::{QuestDb, egress::ColumnView};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     market::{DEFAULT_TIMEFRAME, bars_table_name},
@@ -43,19 +43,64 @@ pub async fn handler(
         StatusCode::BAD_REQUEST,
         "timeframe is not supported".to_string(),
     ))?;
-    let limit = i64::try_from(request.limit).map_err(|_| {
+    let limit_i64 = i64::try_from(request.limit).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             "limit must fit QuestDB's signed 64-bit LIMIT range".to_string(),
         )
     })?;
+    let limit = usize::try_from(request.limit).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "limit does not fit this server's address space".to_string(),
+        )
+    })?;
 
     let questdb = Arc::clone(&state.questdb);
+    let bar_store = state.bar_stores.get(&request.timeframe).cloned().ok_or((
+        StatusCode::BAD_REQUEST,
+        "no Bar store is configured for this timeframe".to_string(),
+    ))?;
     let source = request.source;
     let symbol = request.symbol;
+    let timeframe = request.timeframe;
     let include_raw_ticks = request.include_raw_ticks;
     let payloads = tokio::task::spawn_blocking(move || {
-        query_history(&questdb, table, &source, &symbol, limit, include_raw_ticks)
+        bar_store.refresh()?;
+        let stored = bar_store.read_last_n(&source, &symbol, &timeframe, limit)?;
+        let local_payloads = stored
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to encode archived Bars for history")?;
+
+        // QuestDB is retained as a compatibility source while older history is
+        // being backfilled into the dedicated store. Local records win on key.
+        let legacy_payloads = if local_payloads.len() < limit {
+            match query_history(
+                &questdb,
+                table,
+                &source,
+                &symbol,
+                limit_i64,
+                include_raw_ticks,
+            ) {
+                Ok(payloads) => payloads,
+                Err(error) => {
+                    tracing::warn!(
+                        source,
+                        symbol,
+                        timeframe,
+                        error = %format!("{error:#}"),
+                        "QuestDB history fallback failed; serving Bars from the local store"
+                    );
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        merge_history(local_payloads, legacy_payloads, limit, include_raw_ticks)
     })
     .await
     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
@@ -68,6 +113,45 @@ pub async fn handler(
             "history": payloads
         }
     })))
+}
+
+fn merge_history(
+    local_payloads: Vec<Value>,
+    legacy_payloads: Vec<Value>,
+    limit: usize,
+    include_raw_ticks: bool,
+) -> AnyResult<Vec<Value>> {
+    let mut by_timestamp = BTreeMap::<u64, Value>::new();
+    for mut bar in legacy_payloads {
+        if !include_raw_ticks {
+            strip_raw_ticks(&mut bar);
+        }
+        by_timestamp.insert(bar_timestamp(&bar)?, bar);
+    }
+    for mut bar in local_payloads {
+        if !include_raw_ticks {
+            strip_raw_ticks(&mut bar);
+        }
+        // Dedicated-store contents take precedence over legacy QuestDB rows.
+        by_timestamp.insert(bar_timestamp(&bar)?, bar);
+    }
+    let skip = by_timestamp.len().saturating_sub(limit);
+    Ok(by_timestamp.into_values().skip(skip).collect())
+}
+
+fn bar_timestamp(bar: &Value) -> AnyResult<u64> {
+    let timestamp = bar
+        .get("timestamp")
+        .context("Bar history payload has no timestamp")?;
+    match timestamp {
+        Value::String(timestamp) => timestamp
+            .parse()
+            .context("Bar history timestamp is not an unsigned integer"),
+        Value::Number(timestamp) => timestamp
+            .as_u64()
+            .context("Bar history timestamp is not an unsigned integer"),
+        _ => anyhow::bail!("Bar history timestamp is not an unsigned integer"),
+    }
 }
 
 fn query_history(
@@ -132,7 +216,7 @@ fn strip_raw_ticks(bar: &mut Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryRequest, strip_raw_ticks};
+    use super::{HistoryRequest, merge_history, strip_raw_ticks};
     use serde_json::json;
 
     #[test]
@@ -167,5 +251,24 @@ mod tests {
         assert!(bar.get("raw_ticks").is_none());
         assert_eq!(bar["timestamp"], "123");
         assert_eq!(bar["footprint"]["levels"][0]["price"], "100");
+    }
+
+    #[test]
+    fn history_merge_deduplicates_and_returns_the_latest_bars_in_time_order() {
+        let legacy = vec![
+            json!({"timestamp": "1000", "source": "exchange", "raw_ticks": [1]}),
+            json!({"timestamp": "2000", "source": "exchange", "value": "old"}),
+        ];
+        let local = vec![
+            json!({"timestamp": "2000", "source": "exchange", "value": "new", "raw_ticks": [2]}),
+            json!({"timestamp": "3000", "source": "exchange", "value": "latest"}),
+        ];
+
+        let history = merge_history(local, legacy, 2, false).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0]["timestamp"], "2000");
+        assert_eq!(history[0]["value"], "new");
+        assert_eq!(history[1]["timestamp"], "3000");
+        assert!(history[0].get("raw_ticks").is_none());
     }
 }

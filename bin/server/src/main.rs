@@ -13,12 +13,19 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use aggregator::bar_store::BarStore;
 use anyhow::{Context, Result};
 use pulsar::{Pulsar, TokioExecutor};
 use questdb::QuestDb;
 use server::{server::start_http_server, state::AppState};
+
+const DEFAULT_BAR_STORE_SEGMENT_BYTES: u64 = 256 * 1024 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,10 +64,48 @@ async fn main() -> Result<()> {
         !pulsar_namespace.trim().is_empty(),
         "PULSAR_NAMESPACE cannot be empty"
     );
+    let bar_store_base =
+        std::env::var("AGGREGATOR_BAR_STORE_DIR").unwrap_or_else(|_| "./data/bars".to_string());
+    anyhow::ensure!(
+        !bar_store_base.trim().is_empty(),
+        "AGGREGATOR_BAR_STORE_DIR cannot be empty"
+    );
+    let bar_store_base = PathBuf::from(bar_store_base.trim());
+    let bar_store_base = if bar_store_base.is_absolute() {
+        bar_store_base
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aggregator")
+            .join(bar_store_base)
+    };
+    let segment_bytes = std::env::var("AGGREGATOR_BAR_SEGMENT_BYTES")
+        .ok()
+        .map(|value| {
+            value
+                .trim()
+                .parse::<u64>()
+                .context("AGGREGATOR_BAR_SEGMENT_BYTES must be an unsigned integer")
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_BAR_STORE_SEGMENT_BYTES);
+    let mut bar_stores = BTreeMap::new();
+    for timeframe in server::market::SUPPORTED_TIMEFRAMES {
+        let directory = server::market::bar_store_path(&bar_store_base, timeframe);
+        let store = BarStore::open_read_only(&directory, segment_bytes)
+            .with_context(|| format!("Failed to open Bar history store {}", directory.display()))?;
+        tracing::info!(
+            timeframe,
+            directory = %directory.display(),
+            bars = store.len(),
+            "Opened read-only Bar history store"
+        );
+        bar_stores.insert(timeframe.to_string(), Arc::new(store));
+    }
     let state: AppState = AppState::new(
         Arc::new(questdb),
         pulsar,
         pulsar_namespace.trim().trim_end_matches('/').to_string(),
+        bar_stores,
     );
 
     start_http_server(state).await;

@@ -84,7 +84,11 @@ precedence. The shared `ticks` table must be populated by the merger. Set
   this store before its QuestDB row; unchanged bars encountered during the
   normal reprocessing window are added if missing. QuestDB remains the source
   for tick queries, processing cursors, finalized-bar compatibility, and the
-  durable Pulsar outbox.
+  durable Pulsar outbox. `/server` opens these same timeframe-specific
+  directories read-only, refreshes the append tail for history requests, and
+  falls back to QuestDB for Bars absent from the local store. If
+  `AGGREGATOR_BAR_STORE_DIR` is overridden, configure the same path for both
+  processes.
 - Bars use `(time, source, symbol)` as the UPSERT key within their timeframe
   table. If a late tick falls within the rescan window, the aggregator
   recomputes the affected bar, increments its revision, upserts it, and emits a

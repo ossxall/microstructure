@@ -7,12 +7,12 @@
 use crate::model::{ArchivedBar, Bar, SCHEMA_VERSION};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use memmap2::{Mmap, MmapOptions};
-use rkyv::Deserialize as RkyvDeserialize;
+use rkyv::{AlignedVec, Deserialize as RkyvDeserialize};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
-    io::{Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::RwLock,
 };
@@ -101,20 +101,41 @@ struct StoreState {
 pub struct BarStore {
     directory: PathBuf,
     max_segment_bytes: u64,
+    read_only: bool,
     state: RwLock<StoreState>,
 }
 
 impl BarStore {
     pub fn open(directory: impl Into<PathBuf>, max_segment_bytes: u64) -> Result<Self> {
-        let directory = directory.into();
+        Self::open_inner(directory.into(), max_segment_bytes, false)
+    }
+
+    /// Opens a store for concurrent serving without creating files,
+    /// truncating incomplete tails, or updating its checkpoint.
+    pub fn open_read_only(directory: impl Into<PathBuf>, max_segment_bytes: u64) -> Result<Self> {
+        Self::open_inner(directory.into(), max_segment_bytes, true)
+    }
+
+    fn open_inner(directory: PathBuf, max_segment_bytes: u64, read_only: bool) -> Result<Self> {
         ensure!(
             max_segment_bytes > RECORD_HEADER_SIZE as u64,
             "Bar store segment size must exceed its record header"
         );
-        fs::create_dir_all(&directory)
-            .with_context(|| format!("Failed to create Bar store {}", directory.display()))?;
+        if !read_only {
+            fs::create_dir_all(&directory)
+                .with_context(|| format!("Failed to create Bar store {}", directory.display()))?;
+        }
 
-        let segments = list_segments(&directory)?;
+        let segments = if directory.is_dir() {
+            list_segments(&directory)?
+        } else if read_only {
+            Vec::new()
+        } else {
+            bail!(
+                "Bar store directory {} is not available",
+                directory.display()
+            );
+        };
         let mut checkpoint = match load_checkpoint(&directory, &segments) {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
@@ -142,12 +163,16 @@ impl BarStore {
 
         for (segment, path) in &segments {
             let start = scan_from.get(segment).copied().unwrap_or(0);
-            let physical_len = scan_segment(path, *segment, start, &mut entries_by_key)?;
-            high_water.insert(*segment, physical_len);
+            let valid_end = if read_only {
+                scan_segment_read_only(path, *segment, start, &mut entries_by_key)?
+            } else {
+                scan_segment(path, *segment, start, &mut entries_by_key)?
+            };
+            high_water.insert(*segment, valid_end);
             active_segment = active_segment.max(*segment);
         }
 
-        if segments.is_empty() {
+        if segments.is_empty() && !read_only {
             let path = segment_path(&directory, 0);
             OpenOptions::new()
                 .create(true)
@@ -162,6 +187,7 @@ impl BarStore {
         let store = Self {
             directory,
             max_segment_bytes,
+            read_only,
             state: RwLock::new(StoreState {
                 entries,
                 high_water,
@@ -170,8 +196,42 @@ impl BarStore {
                 uncheckpointed_bytes: 0,
             }),
         };
-        store.persist_index()?;
+        if !read_only {
+            store.persist_index()?;
+        }
         Ok(store)
+    }
+
+    /// Refreshes an already-open read-only view after the aggregator appends
+    /// records. It only indexes fully written, checksum-valid records.
+    pub fn refresh(&self) -> Result<()> {
+        ensure!(
+            self.read_only,
+            "refresh is only available on a read-only Bar store"
+        );
+        let segments = if self.directory.is_dir() {
+            list_segments(&self.directory)?
+        } else {
+            Vec::new()
+        };
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| anyhow!("Bar store index lock is poisoned"))?;
+        for (segment, path) in segments {
+            let start = state.high_water.get(&segment).copied().unwrap_or(0);
+            let mut discovered = BTreeMap::new();
+            let valid_end = scan_segment_read_only(&path, segment, start, &mut discovered)?;
+            for (key, entry) in discovered {
+                match find_entry(&state.entries, &key) {
+                    Ok(position) => state.entries[position] = entry,
+                    Err(position) => state.entries.insert(position, entry),
+                }
+            }
+            state.high_water.insert(segment, valid_end);
+            state.active_segment = state.active_segment.max(segment);
+        }
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -197,6 +257,7 @@ impl BarStore {
     /// Durably checkpoints the in-memory index. Data records are synced on
     /// every write; an uncheckpointed tail is replayed after an unclean exit.
     pub fn flush(&self) -> Result<()> {
+        ensure!(!self.read_only, "cannot checkpoint a read-only Bar store");
         let mut state = self
             .state
             .write()
@@ -227,10 +288,7 @@ impl BarStore {
             return Ok(None);
         };
         let entry = &state.entries[position];
-        let mapping = self.map_segment(entry.segment)?;
-        let archived = archived_for_entry(&mapping, entry)?;
-        validate_archive_key(archived, &entry.key)?;
-        Ok(Some(deserialize_bar(archived)?))
+        Ok(Some(self.read_entry(entry, state.active_segment)?))
     }
 
     /// Reads the newest `n` Bars in a series, ordered by descending timestamp.
@@ -262,8 +320,27 @@ impl BarStore {
             .collect();
 
         let mut mappings = BTreeMap::<u64, Mmap>::new();
+        let mut active_file = None;
         let mut bars = Vec::with_capacity(selected.len());
         for entry in &selected {
+            if self.read_only && entry.segment == state.active_segment {
+                if active_file.is_none() {
+                    let path = segment_path(&self.directory, entry.segment);
+                    active_file = Some(File::open(&path).with_context(|| {
+                        format!("Failed to open Bar segment {}", path.display())
+                    })?);
+                }
+                let payload = self.read_aligned_payload_from(
+                    active_file
+                        .as_mut()
+                        .context("Active Bar segment is not open")?,
+                    entry,
+                )?;
+                let archived = checked_archive(payload.as_ref())?;
+                validate_archive_key(archived, &entry.key)?;
+                bars.push(deserialize_bar(archived)?);
+                continue;
+            }
             if !mappings.contains_key(&entry.segment) {
                 mappings.insert(entry.segment, self.map_segment(entry.segment)?);
             }
@@ -279,8 +356,8 @@ impl BarStore {
 
     /// Gives a validated zero-copy archived view for the duration of `f`.
     ///
-    /// The closure runs while a read lock and mmap are held, preventing this
-    /// store from appending to the mapped file until the view is no longer used.
+    /// The closure runs while the index lock and its backing mmap/buffer are
+    /// held, preventing this process from invalidating the archived reference.
     pub fn with_archived<R>(
         &self,
         key: &BarKey,
@@ -294,13 +371,61 @@ impl BarStore {
             return Ok(None);
         };
         let entry = &state.entries[position];
+        if self.read_only && entry.segment == state.active_segment {
+            let payload = self.read_aligned_payload(entry)?;
+            let archived = checked_archive(payload.as_ref())?;
+            validate_archive_key(archived, &entry.key)?;
+            return f(archived).map(Some);
+        }
         let mapping = self.map_segment(entry.segment)?;
         let archived = archived_for_entry(&mapping, entry)?;
         validate_archive_key(archived, &entry.key)?;
         f(archived).map(Some)
     }
 
+    fn read_entry(&self, entry: &IndexEntry, active_segment: u64) -> Result<Bar> {
+        if self.read_only && entry.segment == active_segment {
+            let payload = self.read_aligned_payload(entry)?;
+            let archived = checked_archive(payload.as_ref())?;
+            validate_archive_key(archived, &entry.key)?;
+            return deserialize_bar(archived);
+        }
+        let mapping = self.map_segment(entry.segment)?;
+        let archived = archived_for_entry(&mapping, entry)?;
+        validate_archive_key(archived, &entry.key)?;
+        deserialize_bar(archived)
+    }
+
+    fn read_aligned_payload(&self, entry: &IndexEntry) -> Result<AlignedVec> {
+        let path = segment_path(&self.directory, entry.segment);
+        let mut file = File::open(&path)
+            .with_context(|| format!("Failed to open Bar segment {}", path.display()))?;
+        self.read_aligned_payload_from(&mut file, entry)
+    }
+
+    fn read_aligned_payload_from(&self, file: &mut File, entry: &IndexEntry) -> Result<AlignedVec> {
+        file.seek(SeekFrom::Start(entry.offset))?;
+        let mut header = [0; RECORD_HEADER_SIZE];
+        file.read_exact(&mut header)
+            .context("Bar record header is truncated")?;
+        let (payload_len, checksum) = parse_record_header(&header)?;
+        ensure!(
+            payload_len == entry.payload_len,
+            "Bar record length does not match the index"
+        );
+        let mut payload = AlignedVec::with_capacity(usize::try_from(payload_len)?);
+        payload.resize(usize::try_from(payload_len)?, 0);
+        file.read_exact(&mut payload)
+            .context("Bar record payload is truncated")?;
+        ensure!(
+            crc32fast::hash(payload.as_ref()) == checksum,
+            "Bar record checksum mismatch"
+        );
+        Ok(payload)
+    }
+
     fn append_bar(&self, bar: &Bar, replace: bool) -> Result<()> {
+        ensure!(!self.read_only, "cannot write to a read-only Bar store");
         validate_bar(bar)?;
         let serialized = rkyv::to_bytes::<_, 4096>(bar)
             .map_err(|error| anyhow!("Failed to serialize Bar with rkyv: {error}"))?;
@@ -342,6 +467,10 @@ impl BarStore {
             file = open_segment_for_append(&path)?;
             old_len = file.metadata()?.len();
             offset = align_up(old_len)?;
+            // Keep the new segment active even if writing this first record
+            // fails. A read-only server may already have observed its file.
+            state.active_segment = segment;
+            state.high_water.entry(segment).or_insert(old_len);
         }
 
         let frame = make_record_header(payload_len, checksum);
@@ -409,10 +538,11 @@ impl BarStore {
             "Bar segment {} is empty",
             path.display()
         );
-        // SAFETY: readers hold the store's RwLock read guard for the complete
-        // mapping lifetime. Appends require its write guard, so this process
-        // cannot mutate a mapped segment while it is being accessed. Store
-        // directories must have a single active writer process.
+        // SAFETY: writer handles hold the store's RwLock read guard for the
+        // complete mapping lifetime, while local appends need its write guard.
+        // Read-only handles mmap only sealed segments; their active segment is
+        // read through File I/O, and the append-only writer never changes a
+        // sealed segment. Store directories must have one active writer.
         unsafe { MmapOptions::new().map(&file) }
             .with_context(|| format!("Failed to mmap Bar segment {}", path.display()))
     }
@@ -795,6 +925,122 @@ fn scan_segment(
     Ok(file.metadata()?.len())
 }
 
+/// Read-only scanner used by the HTTP server. It never truncates an incomplete
+/// tail: the valid watermark stays before that tail so the next refresh retries
+/// it after the writer completes the record.
+fn scan_segment_read_only(
+    path: &Path,
+    segment: u64,
+    start: u64,
+    entries: &mut BTreeMap<BarKey, IndexEntry>,
+) -> Result<u64> {
+    let mut file = File::open(path)
+        .with_context(|| format!("Failed to open Bar segment {}", path.display()))?;
+    let physical_len = file.metadata()?.len();
+    ensure!(
+        start <= physical_len,
+        "Bar segment {} is shorter than its recovery checkpoint",
+        path.display()
+    );
+    let mut offset = align_up(start)?;
+    if offset > physical_len {
+        return Ok(start);
+    }
+    if offset > start {
+        let padding_len = usize::try_from(offset - start)?;
+        let mut padding = vec![0; padding_len];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut padding)
+            .context("Bar segment alignment padding is truncated")?;
+        ensure!(
+            padding.iter().all(|byte| *byte == 0),
+            "Invalid padding at the end of the Bar store checkpoint"
+        );
+    }
+
+    let mut valid_end = start;
+    while offset < physical_len {
+        let remaining = physical_len - offset;
+        if remaining < RECORD_HEADER_SIZE as u64 {
+            break;
+        }
+        file.seek(SeekFrom::Start(offset))?;
+        let mut header = [0; RECORD_HEADER_SIZE];
+        if let Err(error) = file.read_exact(&mut header) {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                break;
+            }
+            return Err(error).context("Failed to read Bar record header");
+        }
+        if &header[..8] != RECORD_MAGIC {
+            if remaining == RECORD_HEADER_SIZE as u64 || header.iter().all(|byte| *byte == 0) {
+                break;
+            }
+            bail!("Corrupt Bar record magic in segment {segment} at offset {offset}");
+        }
+        let (payload_len, checksum) = parse_record_header(&header)
+            .with_context(|| format!("Invalid Bar record in segment {segment} at {offset}"))?;
+        let payload_offset = offset
+            .checked_add(RECORD_HEADER_SIZE as u64)
+            .context("Bar payload offset overflows")?;
+        let record_end = payload_offset
+            .checked_add(payload_len)
+            .context("Bar record end offset overflows")?;
+        if record_end > physical_len {
+            break;
+        }
+
+        let mut payload = AlignedVec::with_capacity(usize::try_from(payload_len)?);
+        payload.resize(usize::try_from(payload_len)?, 0);
+        file.seek(SeekFrom::Start(payload_offset))?;
+        if let Err(error) = file.read_exact(&mut payload) {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                break;
+            }
+            return Err(error).context("Failed to read Bar record payload");
+        }
+        if crc32fast::hash(payload.as_ref()) != checksum {
+            if record_end == physical_len {
+                break;
+            }
+            bail!("Bar record checksum mismatch in segment {segment} at offset {offset}");
+        }
+        let archived = match checked_archive(payload.as_ref()) {
+            Ok(archived) => archived,
+            Err(error) if record_end == physical_len => {
+                tracing::debug!(
+                    segment,
+                    offset,
+                    error = %format!("{error:#}"),
+                    "Ignoring a possibly incomplete final Bar while refreshing"
+                );
+                break;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Corrupt Bar record in segment {segment} at offset {offset}")
+                });
+            }
+        };
+        let bar = deserialize_bar(archived)?;
+        validate_bar(&bar)
+            .with_context(|| format!("Invalid Bar in segment {segment} at offset {offset}"))?;
+        let key = BarKey::from_bar(&bar);
+        entries.insert(
+            key.clone(),
+            IndexEntry {
+                key,
+                segment,
+                offset,
+                payload_len,
+            },
+        );
+        valid_end = record_end;
+        offset = align_up(record_end)?;
+    }
+    Ok(valid_end)
+}
+
 fn list_segments(directory: &Path) -> Result<Vec<(u64, PathBuf)>> {
     let mut segments = Vec::new();
     for entry in fs::read_dir(directory)
@@ -973,6 +1219,43 @@ mod tests {
             .with_archived(&key(0, "BTCUSD"), |archived| Ok(archived.timestamp))
             .unwrap();
         assert_eq!(timestamp, Some(0));
+    }
+
+    #[test]
+    fn read_only_view_refreshes_concurrent_appends_without_checkpointing() {
+        let directory = TestDirectory::new();
+        let writer = BarStore::open(&directory.0, 1024 * 1024).unwrap();
+        writer.write(&bar(0, "BTCUSD", 100)).unwrap();
+        let checkpoint = fs::read(directory.0.join("index.json")).unwrap();
+        let reader = BarStore::open_read_only(&directory.0, 1024 * 1024).unwrap();
+        assert_eq!(reader.len(), 1);
+
+        writer.write(&bar(60_000, "BTCUSD", 101)).unwrap();
+        reader.refresh().unwrap();
+        let latest = reader
+            .read_last_n("test-source", "BTCUSD", "1m", 2)
+            .unwrap();
+
+        assert_eq!(
+            latest.iter().map(|bar| bar.timestamp).collect::<Vec<_>>(),
+            vec![60_000, 0]
+        );
+        assert!(reader.write(&bar(120_000, "BTCUSD", 102)).is_err());
+        assert_eq!(
+            checkpoint,
+            fs::read(directory.0.join("index.json")).unwrap()
+        );
+    }
+
+    #[test]
+    fn read_only_open_does_not_create_a_missing_store_directory() {
+        let directory = TestDirectory::new();
+        let missing_store = directory.0.join("not-created");
+
+        let reader = BarStore::open_read_only(&missing_store, 1024 * 1024).unwrap();
+
+        assert_eq!(reader.len(), 0);
+        assert!(!missing_store.exists());
     }
 
     #[test]

@@ -1,4 +1,21 @@
+use std::path::{Path, PathBuf};
+
 pub const DEFAULT_TIMEFRAME: &str = "1m";
+pub const SUPPORTED_TIMEFRAMES: [&str; 7] = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
+
+pub fn bar_store_path(base: &Path, timeframe: &str) -> PathBuf {
+    if timeframe == DEFAULT_TIMEFRAME {
+        return base.to_path_buf();
+    }
+    let Some(file_name) = base.file_stem().and_then(|name| name.to_str()) else {
+        return base.to_path_buf();
+    };
+    let name = match base.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) => format!("{file_name}-{timeframe}.{extension}"),
+        None => format!("{file_name}-{timeframe}"),
+    };
+    base.with_file_name(name)
+}
 
 pub fn bars_table_name(timeframe: &str) -> Option<&'static str> {
     match timeframe {
@@ -36,7 +53,8 @@ fn is_topic_segment(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{bars_table_name, topic_name};
+    use super::{bar_store_path, bars_table_name, topic_name};
+    use std::path::Path;
 
     #[test]
     fn builds_a_topic_per_source_symbol_and_timeframe() {
@@ -56,6 +74,22 @@ mod tests {
         assert_eq!(
             topic_name("persistent://public/default", "binance", "BTCUSDT", "2m"),
             None
+        );
+    }
+
+    #[test]
+    fn bar_store_paths_match_aggregator_timeframe_isolation() {
+        assert_eq!(
+            bar_store_path(Path::new("/data/bars"), "1m"),
+            Path::new("/data/bars")
+        );
+        assert_eq!(
+            bar_store_path(Path::new("/data/bars"), "5m"),
+            Path::new("/data/bars-5m")
+        );
+        assert_eq!(
+            bar_store_path(Path::new("/data/bars.store"), "5m"),
+            Path::new("/data/bars-5m.store")
         );
     }
 }
