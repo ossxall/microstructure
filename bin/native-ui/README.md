@@ -35,7 +35,10 @@ proyecta precio y `volume_flow.total_qty` para el dibujo. Cada tab tiene además
 un worker de indicadores: recibe snapshots y el plan de Charts, calcula sus
 series fuera del render y publica resultados inmutables. El render consume las
 series vigentes; los objetos `egui_plot` y los cálculos dependientes del viewport
-se mantienen en la UI.
+se mantienen en la UI. Además de OHLCV, el catálogo incluye Momentum alcista y
+bajista: replica el suavizado 14, la referencia de intensidad 100, el peso de
+flujo 0,5, el tope 3 y el calentamiento de 30 Bars de la UI web, y marca Bars
+con integridad dudosa.
 
 Arrastra el asa `⠿` de un Chart y suéltalo sobre un borde de otro: arriba/abajo
 para reordenarlos en filas, o a la izquierda/derecha para ponerlos en la misma
@@ -70,7 +73,8 @@ registra cada evento live.
                           │    │ Worker de indicadores       │◄──── Chart plan
                           │    │ por tab                     │      (ChartKind
                           │    │ lee el Arc más reciente     │       activos)
-                          │    │ calcula EMA 55/200          │
+                          │    │ calcula EMA 55/200 y        │
+                          │    │ Momentum alcista/bajista    │
                           │    └──────────────┬─────────────┘
                           │                   │
                           │       watch: Arc<IndicatorSnapshot>
@@ -86,4 +90,4 @@ registra cada evento live.
                                 ▼
                  ┌─────────────────────────────┐
                  │ egui_plot                   │
-                 │ dibuja velas, volumen y EMA │
+                 │ dibuja OHLCV, EMA y Momentum │

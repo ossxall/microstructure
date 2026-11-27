@@ -9,7 +9,9 @@ use tokio::sync::watch;
 
 use crate::{
     app_log::{AppLogger, LogLevel, format_elapsed},
-    charts::{self, Chart, ChartKind, IndicatorSnapshot, spawn_indicator_worker},
+    charts::{
+        self, Chart, ChartKind, IndicatorSnapshot, IndicatorWorkerConfig, spawn_indicator_worker,
+    },
     market::{
         CalculationWorkerConfig, ChartDataRequest, ChartSnapshot, DEFAULT_HISTORY_LIMIT, FeedKey,
         FeedStatus, spawn_calculation_worker,
@@ -215,16 +217,18 @@ impl ChartApp {
             calculation_tx: calculation_tx.clone(),
         });
 
-        spawn_indicator_worker(
+        spawn_indicator_worker(IndicatorWorkerConfig {
             feed_id,
-            key.timeframe.clone(),
-            snapshot_rx.clone(),
-            indicator_plan_rx,
-            indicator_signal_rx,
+            timeframe: key.timeframe.clone(),
+            snapshot_rx: snapshot_rx.clone(),
+            chart_plan_rx: indicator_plan_rx,
+            update_rx: indicator_signal_rx,
             indicator_tx,
-            self.egui_ctx.clone(),
-            self.active_feed_id.clone(),
-        );
+            egui_ctx: self.egui_ctx.clone(),
+            active_feed_id: self.active_feed_id.clone(),
+            feed: feed_label(&key),
+            logger: self.logger.clone(),
+        });
 
         spawn_calculation_worker(CalculationWorkerConfig {
             feed_id,

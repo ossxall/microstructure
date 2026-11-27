@@ -1,4 +1,5 @@
 mod indicator_worker;
+pub mod momentum;
 mod shared;
 
 pub mod main;
@@ -13,7 +14,7 @@ use crate::{
     theme::PANEL,
 };
 
-pub use indicator_worker::spawn_indicator_worker;
+pub use indicator_worker::{IndicatorWorkerConfig, spawn_indicator_worker};
 
 #[derive(Clone, Debug)]
 pub struct MainIndicatorData {
@@ -21,6 +22,20 @@ pub struct MainIndicatorData {
     pub ema_200: Arc<[[f64; 2]]>,
     pub delta_profile: Arc<[DeltaProfileLevel]>,
     pub delta_profile_tick_size: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MomentumPoint {
+    pub time: f64,
+    pub bullish: Option<f64>,
+    pub bearish: Option<f64>,
+    pub doubtful: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MomentumIndicatorData {
+    pub points: Arc<[MomentumPoint]>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -44,6 +59,7 @@ impl Default for MainIndicatorData {
 #[derive(Clone, Debug)]
 pub enum ChartIndicatorData {
     Main(MainIndicatorData),
+    Momentum(MomentumIndicatorData),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -55,33 +71,40 @@ pub struct IndicatorSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChartKind {
     Main,
+    Momentum,
 }
 
 impl ChartKind {
     /// The chart catalog is shared by every feed tab.
-    pub const ALL: [Self; 1] = [Self::Main];
+    pub const ALL: [Self; 2] = [Self::Main, Self::Momentum];
 
     pub const fn title(self) -> &'static str {
         match self {
             Self::Main => main::TITLE,
+            Self::Momentum => momentum::TITLE,
         }
     }
 
     pub const fn menu_label(self) -> &'static str {
         match self {
             Self::Main => main::MENU_LABEL,
+            Self::Momentum => momentum::MENU_LABEL,
         }
     }
 
     pub fn data_request(self, history_limit: u64) -> ChartDataRequest {
         match self {
             Self::Main => main::data_request(history_limit),
+            Self::Momentum => momentum::data_request(history_limit),
         }
     }
 
     fn calculate_indicators(self, snapshot: &ChartSnapshot, timeframe: &str) -> ChartIndicatorData {
         match self {
             Self::Main => ChartIndicatorData::Main(main::calculate_indicators(snapshot, timeframe)),
+            Self::Momentum => {
+                ChartIndicatorData::Momentum(momentum::calculate_indicators(snapshot))
+            }
         }
     }
 
@@ -100,6 +123,9 @@ impl ChartKind {
             Self::Main => main::show(
                 ui, chart_id, feed_id, feed, timeframe, snapshot, indicators, logger,
             ),
+            Self::Momentum => {
+                momentum::show(ui, chart_id, feed_id, feed, timeframe, snapshot, indicators)
+            }
         }
     }
 }
@@ -189,5 +215,14 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn momentum_chart_requests_complete_bars_for_microstructure_fields() {
+        let request = ChartKind::Momentum.data_request(10);
+
+        assert_eq!(request.history_limit, 31);
+        assert!(request.live);
+        assert!(request.fields.complete_bar);
     }
 }
