@@ -30,7 +30,7 @@ use crate::{
 };
 
 const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:3001/api/market";
-const HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
+const HISTORY_TIMEOUT: Duration = Duration::from_secs(300);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Deserialize)]
