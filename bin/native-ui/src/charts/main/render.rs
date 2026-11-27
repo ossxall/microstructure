@@ -313,18 +313,33 @@ fn draw_delta_profile(
 }
 
 fn format_delta(delta: f64) -> String {
-    if !delta.is_finite() || delta == 0.0 {
+    if !delta.is_finite() {
+        return "—".to_owned();
+    }
+    if delta == 0.0 {
         return "0".to_owned();
     }
 
-    let mut formatted = format!("{delta:+.3}");
-    while formatted.ends_with('0') {
-        formatted.pop();
+    let rounded = format!("{:.3}", delta.abs());
+    let (integer, fraction) = rounded
+        .split_once('.')
+        .map_or((rounded.as_str(), ""), |(integer, fraction)| {
+            (integer, fraction.trim_end_matches('0'))
+        });
+    let mut grouped_integer = String::with_capacity(integer.len() + integer.len() / 3);
+    for (index, digit) in integer.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            grouped_integer.push(',');
+        }
+        grouped_integer.push(digit);
     }
-    if formatted.ends_with('.') {
-        formatted.pop();
+    let grouped_integer = grouped_integer.chars().rev().collect::<String>();
+    let sign = if delta > 0.0 { "+" } else { "−" };
+    if fraction.is_empty() {
+        format!("{sign}{grouped_integer}")
+    } else {
+        format!("{sign}{grouped_integer}.{fraction}")
     }
-    formatted
 }
 
 fn inverted_axis_zoom_factor(delta: f32) -> f32 {
@@ -412,7 +427,15 @@ mod tests {
     #[test]
     fn delta_labels_keep_the_sign_and_trim_unneeded_decimals() {
         assert_eq!(format_delta(12.5), "+12.5");
-        assert_eq!(format_delta(-3.125), "-3.125");
+        assert_eq!(format_delta(-3.125), "−3.125");
         assert_eq!(format_delta(0.0), "0");
+    }
+
+    #[test]
+    fn delta_labels_group_thousands_and_limit_fraction_digits() {
+        assert_eq!(format_delta(1_234_567.8914), "+1,234,567.891");
+        assert_eq!(format_delta(-1_000.0), "−1,000");
+        assert_eq!(format_delta(0.0004), "+0");
+        assert_eq!(format_delta(f64::INFINITY), "—");
     }
 }
