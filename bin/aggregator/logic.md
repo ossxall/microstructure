@@ -28,6 +28,16 @@ como cadenas decimales, renombró `returns` a `price_changes` y agregó
   guarda en un archivo JSON por timeframe.
 - `src/config.rs`: carga `.env.dev` y variables de entorno, valida opciones y
   resuelve duración y rutas específicas del timeframe.
+- `bin/shared/payload_codec.rs` (incluido desde `src/main.rs`): comprime con
+  gzip y Base64 los payloads que se guardan en QuestDB cuando reduce su tamaño;
+  al leerlos, también acepta filas JSON antiguas sin comprimir. La salida
+  enviada a Pulsar sigue siendo JSON.
+
+El runtime usa Tokio para coordinar el sondeo final, el sondeo live y el cierre
+ordenado de productores Pulsar. Las operaciones síncronas de QuestDB se ejecutan
+en tareas `spawn_blocking`, para no bloquear el executor asíncrono. Los
+productores Pulsar se crean bajo demanda y se reutilizan por topic durante la
+vida del proceso.
 
 ### Flujo
 
@@ -60,6 +70,13 @@ vuelve a examinar las ventanas dentro de `REPROCESS_MINUTES` (redondeadas a
 ventanas completas, con al menos la última ventana cerrada). Esto permite
 corregir barras afectadas por ticks tardíos.
 
+El ciclo final y el live son independientes: el primero procesa ventanas ya
+cerradas, actualiza el cursor y usa la outbox durable; el segundo solo vuelve a
+leer la ventana UTC activa y mantiene en memoria el último JSON por barra para
+detectar cambios. Un error en un ciclo se registra y se reintenta en el siguiente
+sondeo; las barras finales y sus eventos pendientes se pueden recuperar desde
+QuestDB.
+
 Las ventanas son UTC y semiabiertas: `[inicio, fin)`. Una ventana sin ticks no
 genera barras, pero sí puede avanzar el cursor. Una ventana con datos se divide
 por `(source, symbol)`; cada grupo produce una barra independiente.
@@ -79,6 +96,19 @@ se marcan como publicados. QuestDB y Pulsar no comparten una transacción: la
 entrega es al menos una vez, así que puede haber duplicados si el proceso cae
 después de publicar y antes de registrar la confirmación. Los consumidores deben
 hacer idempotencia con `event_id`.
+
+Las barras finales se guardan en `bars_{timeframe}` y sus eventos en la tabla
+outbox del timeframe. El codec compartido almacena los payloads como
+`gzip+base64:` cuando la compresión reduce el tamaño; los payloads pequeños
+pueden quedar como JSON plano. El límite seguro por fila almacenada es 15 MiB
+para dejar margen bajo el máximo de 16 MiB de un frame QWP. Al recuperar un
+payload, el codec lo decodifica antes de comparar barras o publicar el evento.
+Pulsar recibe el sobre JSON sin esta compresión.
+
+Los topics se enrutan por fuente, símbolo y timeframe:
+`{PULSAR_NAMESPACE}/bars-{source}-{symbol}-{timeframe}`. Cada segmento de
+fuente, símbolo y timeframe solo puede contener caracteres ASCII alfanuméricos,
+guion o guion bajo; el agregador rechaza valores que no cumplan esa regla.
 
 Cada timeframe aísla sus tablas, cursor, outbox, registro de IDs y directorio
 store-and-forward. Para `1m` se conservan los nombres históricos (`bars_1m`,
