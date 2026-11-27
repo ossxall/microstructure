@@ -1,5 +1,5 @@
 use eframe::egui::{self, Color32, Stroke};
-use egui_plot::{Axis, Line, Plot, PlotMemory, PlotPoints, Polygon};
+use egui_plot::{Axis, HPlacement, Line, Plot, PlotMemory, PlotPoints, Polygon};
 
 use crate::{
     app_log::AppLogger,
@@ -70,6 +70,7 @@ pub fn show(
         .link_axis(x_link, egui::Vec2b::new(true, false))
         .set_margin_fraction(egui::Vec2::new(0.05, 0.12))
         .grid_color(GRID)
+        .y_axis_position(HPlacement::Right)
         .show_axes(egui::Vec2b::new(true, true))
         .show_x(true)
         .allow_zoom(egui::Vec2b::new(true, true))
@@ -229,8 +230,8 @@ fn reverse_axis_zoom_drag(
         egui::pos2(plot_rect.right(), chart_rect.bottom()),
     );
     let y_axis_rect = egui::Rect::from_min_max(
-        chart_rect.left_top(),
-        egui::pos2(plot_rect.left(), plot_rect.bottom()),
+        egui::pos2(plot_rect.right(), chart_rect.top()),
+        egui::pos2(chart_rect.right(), plot_rect.bottom()),
     );
     let x_axis_response = ui
         .interact(
