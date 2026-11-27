@@ -93,13 +93,10 @@ pub fn show(
 
         let bounds = plot_ui.plot_bounds();
         let x_bounds = bounds.range_x();
-        let visible_bars = bars
-            .iter()
-            .filter(|bar| {
-                let x = bar.candle.timestamp_ms as f64 / 1_000.0;
-                x >= *x_bounds.start() && x <= *x_bounds.end()
-            })
-            .collect::<Vec<_>>();
+        let visible_bar_range = shared::visible_range(bars, &x_bounds, |bar| {
+            bar.candle.timestamp_ms as f64 / 1_000.0
+        });
+        let visible_bars = &bars[visible_bar_range];
         let visible_min_price = visible_bars
             .iter()
             .map(|bar| bar.candle.low)
@@ -199,16 +196,14 @@ pub fn show(
                     main_indicators.ema_200.as_ref(),
                 ),
             ] {
-                let points = source_points
-                    .iter()
-                    .copied()
-                    .filter(|point| point[0] >= *x_bounds.start() && point[0] <= *x_bounds.end())
-                    .collect::<Vec<_>>();
+                let visible_point_range =
+                    shared::visible_range(source_points, &x_bounds, |point| point[0]);
+                let points = &source_points[visible_point_range];
                 if points.is_empty() {
                     continue;
                 }
                 plot_ui.line(
-                    Line::new(format!("EMA {period}"), PlotPoints::from(points))
+                    Line::new(format!("EMA {period}"), PlotPoints::from(points.to_vec()))
                         .color(color)
                         .width(1.8)
                         .allow_hover(false),
