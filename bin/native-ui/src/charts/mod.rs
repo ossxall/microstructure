@@ -120,7 +120,7 @@ pub fn show(
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(can_close, egui::Button::new("×").small())
-                    .on_hover_text("Cerrar Chart en todas las pestañas")
+                    .on_hover_text("Cerrar Chart en esta pestaña")
                     .clicked()
                 {
                     close = true;
@@ -160,30 +160,10 @@ pub fn show(
     ChartResponse { close, drop }
 }
 
-pub fn default_layout() -> Vec<Chart> {
-    ChartKind::ALL
-        .into_iter()
-        .enumerate()
-        .map(|(index, kind)| Chart::new(index as u64 + 1, kind))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ChartKind, default_layout};
+    use super::ChartKind;
     use crate::market::BarFields;
-
-    #[test]
-    fn default_layout_has_one_chart_for_each_catalog_entry() {
-        let charts = default_layout();
-        let kinds = charts.iter().map(|chart| chart.kind).collect::<Vec<_>>();
-
-        assert_eq!(kinds, ChartKind::ALL);
-        assert_eq!(
-            charts.iter().map(|chart| chart.id).collect::<Vec<_>>(),
-            [1, 2]
-        );
-    }
 
     #[test]
     fn chart_data_requirements_are_declared_by_each_chart_module() {

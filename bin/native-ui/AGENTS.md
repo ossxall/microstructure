@@ -6,6 +6,12 @@
 - Trata `egui_plot-0.38.0/` como código de dependencia: no lo modifiques salvo que la tarea pida expresamente cambiar esa dependencia.
 - Mantén los cambios de la aplicación en el código de `native-ui` y no cambies la configuración de dependencias solo por consultar esta referencia.
 
+## Registro de eventos
+
+- Registra con `AppLogger` (`src/app_log.rs`) cada evento importante del funcionamiento de la aplicación para que aparezca en el diálogo «Estado y logs» de la UI. Revisa `src/app.rs` para ver cómo se muestra el diálogo y cómo se comparte el logger.
+- Incluye, cuando corresponda, el inicio y resultado de acciones del usuario, cambios relevantes de estado, operaciones de carga y eventos de red (conexión, desconexión, reintentos y errores). Usa `info` para el flujo normal, `warning` para situaciones recuperables y `error` para fallos; añade el contexto del feed cuando esté disponible.
+- No registres cada frame, tick de mercado ni eventos repetitivos de bajo valor. Evita incluir credenciales u otros datos sensibles y redacta mensajes claros que permitan entender qué ocurrió y su resultado.
+
 ## Tema visual
 
 - Mantén una identidad oscura, minimalista y de alto contraste: fondo negro (`#000000`), texto y ejes blancos (`#FFFFFF`) y cuadrícula discreta LightSlateGray (`#778899`).
