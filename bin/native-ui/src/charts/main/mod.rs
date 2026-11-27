@@ -14,8 +14,8 @@ pub(super) const MENU_LABEL: &str = "Main";
 
 pub(super) use render::show;
 
-pub(super) fn calculate_indicators(snapshot: &ChartSnapshot) -> MainIndicatorData {
-    indicators::calculate(&snapshot.full_bars)
+pub(super) fn calculate_indicators(snapshot: &ChartSnapshot, timeframe: &str) -> MainIndicatorData {
+    indicators::calculate(&snapshot.full_bars, timeframe)
 }
 
 pub(super) fn data_request(history_limit: u64) -> ChartDataRequest {
@@ -25,6 +25,7 @@ pub(super) fn data_request(history_limit: u64) -> ChartDataRequest {
         fields: BarFields {
             price: true,
             volume_flow: true,
+            footprint: true,
             ..Default::default()
         },
     }

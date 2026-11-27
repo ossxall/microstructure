@@ -6,7 +6,9 @@ use crate::{
     charts::shared::{self, show_waiting},
     charts::{ChartIndicatorData, ChartKind, IndicatorSnapshot},
     market::ChartSnapshot,
-    theme::{EMA_55, EMA_200, GRID, LIME, VOLUME},
+    theme::{
+        EMA_55, EMA_200, GRID, LIME, PROFILE_BEARISH, PROFILE_BULLISH, PROFILE_NEUTRAL, VOLUME,
+    },
 };
 
 use super::{INITIAL_VISIBLE_BARS, indicators};
@@ -33,6 +35,11 @@ pub fn show(
             ui.label(egui::RichText::new("VOL").color(VOLUME).small().strong());
             ui.label(egui::RichText::new("EMA 55").color(EMA_55).small());
             ui.label(egui::RichText::new("EMA 200").color(EMA_200).small());
+            ui.label(
+                egui::RichText::new("DELTA PROFILE · 15m")
+                    .color(PROFILE_BULLISH)
+                    .small(),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.button("Ajustar vista")
                     .on_hover_text("Mostrar todo el historial cargado y ajustar la escala")
@@ -209,8 +216,91 @@ pub fn show(
                         .allow_hover(false),
                 );
             }
+
+            draw_delta_profile(
+                plot_ui,
+                main_indicators.delta_profile.as_ref(),
+                main_indicators.delta_profile_tick_size,
+                &x_bounds,
+                *bounds.range_y().start(),
+                *bounds.range_y().end(),
+                chart_id,
+            );
         }
     });
+}
+
+fn draw_delta_profile(
+    plot_ui: &mut egui_plot::PlotUi<'_>,
+    levels: &[crate::charts::DeltaProfileLevel],
+    tick_size: f64,
+    x_bounds: &std::ops::RangeInclusive<f64>,
+    price_min: f64,
+    price_max: f64,
+    chart_id: u64,
+) {
+    if levels.is_empty() || !tick_size.is_finite() || tick_size <= 0.0 {
+        return;
+    }
+
+    let x_min = *x_bounds.start();
+    let x_max = *x_bounds.end();
+    let x_range = x_max - x_min;
+    if !x_range.is_finite() || x_range <= 0.0 {
+        return;
+    }
+
+    let visible_levels = levels
+        .iter()
+        .filter(|level| {
+            level.price >= price_min - tick_size && level.price <= price_max + tick_size
+        })
+        .collect::<Vec<_>>();
+    let max_volume = visible_levels
+        .iter()
+        .map(|level| level.buy_volume + level.sell_volume)
+        .fold(0.0, f64::max);
+    if visible_levels.is_empty() || !max_volume.is_finite() || max_volume <= 0.0 {
+        return;
+    }
+
+    // Keep the profile fixed to the chart's right edge, using a narrow strip
+    // of the visible time range so it stays aligned while zooming and panning.
+    let profile_width = x_range * 0.2;
+    let right = x_max - x_range * 0.015;
+    let half_height = tick_size * 0.39;
+
+    for (index, level) in visible_levels.into_iter().enumerate() {
+        let total_volume = level.buy_volume + level.sell_volume;
+        if !total_volume.is_finite() || total_volume <= 0.0 {
+            continue;
+        }
+        let width = profile_width * (total_volume / max_volume).clamp(0.0, 1.0);
+        let color = if level.buy_volume > level.sell_volume {
+            PROFILE_BULLISH
+        } else if level.sell_volume > level.buy_volume {
+            PROFILE_BEARISH
+        } else {
+            PROFILE_NEUTRAL
+        };
+        let color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 190);
+        let price_low = level.price - half_height;
+        let price_high = level.price + half_height;
+        plot_ui.polygon(
+            Polygon::new(
+                format!("delta-profile-{chart_id}-{index}"),
+                vec![
+                    [right - width, price_low],
+                    [right, price_low],
+                    [right, price_high],
+                    [right - width, price_high],
+                ],
+            )
+            .fill_color(color)
+            .stroke(Stroke::NONE)
+            .allow_hover(false),
+        );
+    }
 }
 
 fn inverted_axis_zoom_factor(delta: f32) -> f32 {

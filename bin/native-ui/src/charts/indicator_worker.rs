@@ -16,6 +16,7 @@ use super::{ChartKind, IndicatorSnapshot};
 
 pub fn spawn_indicator_worker(
     feed_id: u64,
+    timeframe: String,
     snapshot_rx: watch::Receiver<Arc<ChartSnapshot>>,
     chart_plan_rx: watch::Receiver<Arc<[ChartKind]>>,
     update_rx: Receiver<()>,
@@ -43,7 +44,7 @@ pub fn spawn_indicator_worker(
                 let charts = chart_plan
                     .iter()
                     .copied()
-                    .map(|kind| (kind, kind.calculate_indicators(&snapshot)))
+                    .map(|kind| (kind, kind.calculate_indicators(&snapshot, &timeframe)))
                     .collect();
                 indicator_tx.send_replace(Arc::new(IndicatorSnapshot {
                     source_generation: snapshot.generation,
@@ -80,6 +81,7 @@ mod tests {
         let (indicator_tx, indicator_rx) = watch::channel(Arc::new(IndicatorSnapshot::default()));
         let worker = spawn_indicator_worker(
             7,
+            "1m".to_owned(),
             snapshot_rx,
             plan_rx,
             signal_rx,

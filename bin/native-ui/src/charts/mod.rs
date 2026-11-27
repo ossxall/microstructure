@@ -19,6 +19,15 @@ pub use indicator_worker::spawn_indicator_worker;
 pub struct MainIndicatorData {
     pub ema_55: Arc<[[f64; 2]]>,
     pub ema_200: Arc<[[f64; 2]]>,
+    pub delta_profile: Arc<[DeltaProfileLevel]>,
+    pub delta_profile_tick_size: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeltaProfileLevel {
+    pub price: f64,
+    pub buy_volume: f64,
+    pub sell_volume: f64,
 }
 
 impl Default for MainIndicatorData {
@@ -26,6 +35,8 @@ impl Default for MainIndicatorData {
         Self {
             ema_55: Vec::new().into(),
             ema_200: Vec::new().into(),
+            delta_profile: Vec::new().into(),
+            delta_profile_tick_size: 0.0,
         }
     }
 }
@@ -68,9 +79,9 @@ impl ChartKind {
         }
     }
 
-    fn calculate_indicators(self, snapshot: &ChartSnapshot) -> ChartIndicatorData {
+    fn calculate_indicators(self, snapshot: &ChartSnapshot, timeframe: &str) -> ChartIndicatorData {
         match self {
-            Self::Main => ChartIndicatorData::Main(main::calculate_indicators(snapshot)),
+            Self::Main => ChartIndicatorData::Main(main::calculate_indicators(snapshot, timeframe)),
         }
     }
 
@@ -174,6 +185,7 @@ mod tests {
             BarFields {
                 price: true,
                 volume_flow: true,
+                footprint: true,
                 ..Default::default()
             }
         );

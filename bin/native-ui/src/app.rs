@@ -217,6 +217,7 @@ impl ChartApp {
 
         spawn_indicator_worker(
             feed_id,
+            key.timeframe.clone(),
             snapshot_rx.clone(),
             indicator_plan_rx,
             indicator_signal_rx,
