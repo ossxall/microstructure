@@ -1,4 +1,5 @@
 pub mod bid_ask_flow;
+pub mod footprint;
 mod indicator_worker;
 pub mod momentum;
 mod shared;
@@ -84,6 +85,9 @@ pub enum ChartIndicatorData {
 pub struct IndicatorSnapshot {
     pub source_generation: u64,
     pub charts: HashMap<ChartKind, ChartIndicatorData>,
+    /// Footprint settings are per chart instance, unlike the existing
+    /// timeframe-independent indicator series.
+    pub footprints: HashMap<u64, footprint::FootprintIndicatorData>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -91,17 +95,27 @@ pub enum ChartKind {
     Main,
     Momentum,
     BidAskFlow,
+    Footprint,
 }
 
 impl ChartKind {
     /// The chart catalog is shared by every feed tab.
-    pub const ALL: [Self; 3] = [Self::Main, Self::Momentum, Self::BidAskFlow];
+    pub const ALL: [Self; 4] = [
+        Self::Main,
+        Self::Momentum,
+        Self::BidAskFlow,
+        Self::Footprint,
+    ];
+
+    /// Keep the new chart opt-in so opening a tab does not add another window.
+    pub const DEFAULT: [Self; 3] = [Self::Main, Self::Momentum, Self::BidAskFlow];
 
     pub const fn title(self) -> &'static str {
         match self {
             Self::Main => main::TITLE,
             Self::Momentum => momentum::TITLE,
             Self::BidAskFlow => bid_ask_flow::TITLE,
+            Self::Footprint => footprint::TITLE,
         }
     }
 
@@ -110,6 +124,7 @@ impl ChartKind {
             Self::Main => main::MENU_LABEL,
             Self::Momentum => momentum::MENU_LABEL,
             Self::BidAskFlow => bid_ask_flow::MENU_LABEL,
+            Self::Footprint => footprint::MENU_LABEL,
         }
     }
 
@@ -118,18 +133,35 @@ impl ChartKind {
             Self::Main => main::data_request(history_limit),
             Self::Momentum => momentum::data_request(history_limit),
             Self::BidAskFlow => bid_ask_flow::data_request(history_limit),
+            Self::Footprint => ChartDataRequest {
+                history_limit: history_limit.max(1),
+                live: true,
+                fields: crate::market::BarFields {
+                    price: true,
+                    volume_flow: true,
+                    footprint: true,
+                    ..Default::default()
+                },
+            },
         }
     }
 
-    fn calculate_indicators(self, snapshot: &ChartSnapshot, timeframe: &str) -> ChartIndicatorData {
+    fn calculate_indicators(
+        self,
+        snapshot: &ChartSnapshot,
+        timeframe: &str,
+    ) -> Option<ChartIndicatorData> {
         match self {
-            Self::Main => ChartIndicatorData::Main(main::calculate_indicators(snapshot, timeframe)),
-            Self::Momentum => {
-                ChartIndicatorData::Momentum(momentum::calculate_indicators(snapshot))
-            }
-            Self::BidAskFlow => {
-                ChartIndicatorData::BidAskFlow(bid_ask_flow::calculate_indicators(snapshot))
-            }
+            Self::Main => Some(ChartIndicatorData::Main(main::calculate_indicators(
+                snapshot, timeframe,
+            ))),
+            Self::Momentum => Some(ChartIndicatorData::Momentum(
+                momentum::calculate_indicators(snapshot),
+            )),
+            Self::BidAskFlow => Some(ChartIndicatorData::BidAskFlow(
+                bid_ask_flow::calculate_indicators(snapshot),
+            )),
+            Self::Footprint => None,
         }
     }
 
@@ -143,6 +175,8 @@ impl ChartKind {
         snapshot: &ChartSnapshot,
         indicators: &IndicatorSnapshot,
         logger: &AppLogger,
+        footprint_timeframe_ms: u64,
+        timeframe_change: &mut Option<u64>,
     ) {
         match self {
             Self::Main => main::show(
@@ -154,6 +188,18 @@ impl ChartKind {
             Self::BidAskFlow => {
                 bid_ask_flow::show(ui, chart_id, feed_id, timeframe, snapshot, indicators)
             }
+            Self::Footprint => footprint::show(
+                ui,
+                chart_id,
+                feed_id,
+                feed,
+                timeframe,
+                footprint_timeframe_ms,
+                snapshot,
+                indicators,
+                logger,
+                timeframe_change,
+            ),
         }
     }
 }
@@ -162,15 +208,30 @@ impl ChartKind {
 pub struct Chart {
     pub id: u64,
     pub kind: ChartKind,
+    pub footprint_timeframe_ms: u64,
 }
 
 impl Chart {
     pub const fn new(id: u64, kind: ChartKind) -> Self {
-        Self { id, kind }
+        Self {
+            id,
+            kind,
+            footprint_timeframe_ms: footprint::DEFAULT_TIMEFRAME_MS,
+        }
     }
 
-    pub fn data_request(self, history_limit: u64) -> ChartDataRequest {
-        self.kind.data_request(history_limit)
+    pub fn new_for_source(id: u64, kind: ChartKind, source_timeframe: &str) -> Self {
+        let mut chart = Self::new(id, kind);
+        chart.footprint_timeframe_ms = footprint::default_timeframe(source_timeframe);
+        chart
+    }
+
+    pub fn data_request(self, history_limit: u64, source_timeframe: &str) -> ChartDataRequest {
+        if self.kind == ChartKind::Footprint {
+            footprint::data_request(history_limit, source_timeframe, self.footprint_timeframe_ms)
+        } else {
+            self.kind.data_request(history_limit)
+        }
     }
 }
 
@@ -190,6 +251,7 @@ pub fn show_window(
     default_size: egui::Vec2,
     min_size: egui::Vec2,
     can_close: bool,
+    timeframe_change: &mut Option<u64>,
 ) -> bool {
     let mut open = true;
     let title = egui::RichText::new(chart.kind.title()).small();
@@ -217,7 +279,16 @@ pub fn show_window(
     }
     window.show(ctx, |ui| {
         chart.kind.render(
-            ui, chart.id, feed_id, feed, timeframe, snapshot, indicators, logger,
+            ui,
+            chart.id,
+            feed_id,
+            feed,
+            timeframe,
+            snapshot,
+            indicators,
+            logger,
+            chart.footprint_timeframe_ms,
+            timeframe_change,
         );
     });
     !open
@@ -261,5 +332,23 @@ mod tests {
         assert_eq!(request.history_limit, 10);
         assert!(request.live);
         assert!(request.fields.raw_ticks);
+    }
+
+    #[test]
+    fn footprint_chart_requests_enough_final_source_bars_from_the_tab_feed() {
+        let chart = super::Chart::new_for_source(1, ChartKind::Footprint, "5m");
+        let request = chart.data_request(10, "5m");
+
+        assert_eq!(request.history_limit, 14);
+        assert!(request.live);
+        assert_eq!(
+            request.fields,
+            BarFields {
+                price: true,
+                volume_flow: true,
+                footprint: true,
+                ..Default::default()
+            }
+        );
     }
 }

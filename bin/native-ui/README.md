@@ -25,18 +25,24 @@ de Bar. La capa de cálculo reconcilia history y live por timestamp y publica un
 snapshot inmutable compartido por todos los Charts del feed. `ChartSnapshot` expone
 las Bars completas en `full_bars`. Para acceder a los campos de una Bar, usa
 `BarSnapshot::attributes()`: devuelve el objeto de Bar tanto para history como
-para eventos live (en estos últimos, extrae el objeto `data`). Usa
-`BarSnapshot::source_payload()` solo si también necesitas el envoltorio del
-evento live y sus metadatos, como `event_id` o `is_final`. En history, el payload
-suele ser directamente el objeto Bar. Ambos métodos exponen la estructura JSON
+para eventos live (en estos últimos, extrae el objeto `data`). `revision`,
+`is_final` y los conflictos de revisión también se exponen como metadatos del
+snapshot. Usa `BarSnapshot::source_payload()` si necesitas el envoltorio del
+evento live, por ejemplo para leer `event_id`. En history, el payload suele ser
+directamente el objeto Bar. Ambos métodos exponen la estructura JSON
 parseada, no el texto original byte por byte. Los datos se comparten mediante
 `Arc`, sin clonar el contenido al publicar el snapshot. El OHLCV actual solo
 proyecta precio y `volume_flow.total_qty` para el dibujo. Cada tab tiene además
 un worker de indicadores: recibe snapshots y el plan de Charts, calcula sus
 series fuera del render y publica resultados inmutables. El render consume las
 series vigentes; los objetos `egui_plot` y los cálculos dependientes del viewport
-se mantienen en la UI. Además de OHLCV, el catálogo incluye Momentum alcista y
-bajista: replica el suavizado 14, la referencia de intensidad 100, el peso de
+se mantienen en la UI. Además de OHLCV y Momentum alcista/bajista, el catálogo
+incluye Footprint: muestra una sola vela resampleada desde las Bars finales de
+la misma tab, con 1h por defecto y opciones compatibles con el timeframe fuente.
+Fusiona los niveles y recalcula sus métricas con enteros exactos; la vista agrupa
+por defecto cuatro niveles de precio para hacer las filas más gruesas, ajustable
+desde el chart. Al elegir ventanas más largas solicita más history del mismo feed.
+Momentum replica el suavizado 14, la referencia de intensidad 100, el peso de
 flujo 0,5, el tope 3 y el calentamiento de 30 Bars de la UI web, y marca Bars
 con integridad dudosa.
 

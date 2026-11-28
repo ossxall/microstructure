@@ -85,6 +85,11 @@ pub struct ChartSnapshot {
 pub struct BarSnapshot {
     pub timestamp_ms: u64,
     pub candle: Candle,
+    pub revision: u64,
+    pub is_final: bool,
+    /// True when the feed supplied different contents for the same Bar
+    /// identity and revision.
+    pub revision_conflict: bool,
     payload: Arc<Value>,
 }
 
@@ -142,6 +147,7 @@ struct StoredBar {
     candle: Candle,
     revision: u64,
     is_final: bool,
+    revision_conflict: bool,
     event_id: Option<String>,
     trade_count: Option<u64>,
     checksum: Option<String>,
@@ -298,6 +304,16 @@ fn coalesce_live_snapshots(inputs: Vec<CalculationInput>) -> Vec<CalculationInpu
                 }
             },
         );
+
+        if let Some((true, current_revision, current_payload)) = latest_by_timestamp.get(&timestamp)
+            && is_final
+            && *current_revision == revision
+            && !same_bar_attributes_json(current_payload, &payload)
+        {
+            // Preserve both finalized payloads so reconciliation can report
+            // the same-revision conflict rather than hiding it in this batch.
+            passthrough.push(CalculationInput::Live(current_payload.clone()));
+        }
 
         if replace {
             latest_by_timestamp.insert(timestamp, (is_final, revision, payload));
@@ -507,6 +523,7 @@ fn parse_bar(
         candle,
         revision,
         is_final,
+        revision_conflict: false,
         event_id,
         trade_count,
         checksum,
@@ -517,7 +534,28 @@ fn snapshot_bar(bar: &StoredBar) -> BarSnapshot {
     BarSnapshot {
         timestamp_ms: bar.candle.timestamp_ms,
         candle: bar.candle,
+        revision: bar.revision,
+        is_final: bar.is_final,
+        revision_conflict: bar.revision_conflict,
         payload: bar.payload.clone(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_bar_snapshot(
+    payload: Value,
+    revision: u64,
+    is_final: bool,
+    revision_conflict: bool,
+) -> BarSnapshot {
+    let candle = project_candle(&payload, true, true).expect("valid test Bar");
+    BarSnapshot {
+        timestamp_ms: candle.timestamp_ms,
+        candle,
+        revision,
+        is_final,
+        revision_conflict,
+        payload: Arc::new(payload),
     }
 }
 
@@ -589,13 +627,43 @@ fn project_candle(payload: &Value, needs_price: bool, needs_volume: bool) -> Opt
 
 fn upsert_bar(bars: &mut BTreeMap<u64, StoredBar>, incoming: StoredBar) -> bool {
     let timestamp = incoming.candle.timestamp_ms;
-    if let Some(current) = bars.get(&timestamp)
-        && !should_replace(current, &incoming)
-    {
-        return false;
+    if let Some(current) = bars.get_mut(&timestamp) {
+        if current.is_final && incoming.is_final && current.revision == incoming.revision {
+            if !same_bar_attributes_value(current.payload.as_ref(), incoming.payload.as_ref())
+                && !current.revision_conflict
+            {
+                current.revision_conflict = true;
+                return true;
+            }
+            return false;
+        }
+        if !should_replace(current, &incoming) {
+            return false;
+        }
     }
     bars.insert(timestamp, incoming);
     true
+}
+
+fn same_bar_attributes_json(left: &str, right: &str) -> bool {
+    let (Ok(left), Ok(right)) = (
+        serde_json::from_str::<Value>(left),
+        serde_json::from_str::<Value>(right),
+    ) else {
+        return left == right;
+    };
+    same_bar_attributes_value(&left, &right)
+}
+
+fn same_bar_attributes_value(left: &Value, right: &Value) -> bool {
+    bar_attributes(left) == bar_attributes(right)
+}
+
+fn bar_attributes(value: &Value) -> &Value {
+    value
+        .get("data")
+        .filter(|data| data.is_object())
+        .unwrap_or(value)
 }
 
 fn should_replace(current: &StoredBar, incoming: &StoredBar) -> bool {
@@ -648,7 +716,7 @@ fn value_as_f64(value: &Value) -> Option<f64> {
 mod tests {
     use super::{
         AppLogger, BarFields, Bytes, CalculationInput, ChartDataRequest, FeedKey, FeedStatus,
-        apply_input, coalesce_live_snapshots, parse_bar, snapshot_bar,
+        apply_input, coalesce_live_snapshots, parse_bar, snapshot_bar, upsert_bar,
     };
     use eframe::egui;
     use serde_json::json;
@@ -698,6 +766,8 @@ mod tests {
         let history_snapshot = snapshot_bar(&history);
 
         assert_eq!(history_snapshot.attributes()["raw_ticks"][0]["id"], "1");
+        assert_eq!(history_snapshot.revision, 1);
+        assert!(history_snapshot.is_final);
         assert!(std::sync::Arc::ptr_eq(
             &history.payload,
             &history_snapshot.payload
@@ -716,6 +786,7 @@ mod tests {
             "10000"
         );
         assert_eq!(live_snapshot.source_payload()["event_id"], "bar:live:3:abc");
+        assert!(!live_snapshot.is_final);
         assert!(std::sync::Arc::ptr_eq(
             &live.payload,
             &live_snapshot.payload
@@ -789,6 +860,38 @@ mod tests {
             "1"
         );
         assert!(history_error.is_none());
+    }
+
+    #[test]
+    fn same_final_revision_with_different_contents_is_marked_as_a_conflict() {
+        let first = parse_bar(full_bar("60000", "1", "3"), true, true, true).unwrap();
+        let different = parse_bar(full_bar("60000", "1", "4"), true, true, true).unwrap();
+        let mut bars = BTreeMap::new();
+
+        assert!(upsert_bar(&mut bars, first));
+        assert!(upsert_bar(&mut bars, different));
+        assert!(snapshot_bar(bars.get(&60_000).unwrap()).revision_conflict);
+    }
+
+    #[test]
+    fn live_coalescing_preserves_same_revision_final_conflicts_for_reconciliation() {
+        let first = json!({
+            "is_final": true,
+            "data": full_bar("60000", "1", "3")
+        });
+        let different = json!({
+            "is_final": true,
+            "data": full_bar("60000", "1", "4")
+        });
+
+        assert_eq!(
+            coalesce_live_snapshots(vec![
+                CalculationInput::Live(first.to_string()),
+                CalculationInput::Live(different.to_string()),
+            ])
+            .len(),
+            2
+        );
     }
 
     #[test]

@@ -30,7 +30,7 @@ struct ChartTab {
     _calculation_tx: mpsc::Sender<crate::market::CalculationInput>,
     snapshot_rx: watch::Receiver<Arc<ChartSnapshot>>,
     indicator_rx: watch::Receiver<Arc<IndicatorSnapshot>>,
-    indicator_plan_tx: watch::Sender<Arc<[ChartKind]>>,
+    indicator_plan_tx: watch::Sender<Arc<[Chart]>>,
     indicator_signal_tx: mpsc::SyncSender<()>,
 }
 
@@ -52,8 +52,19 @@ pub struct ChartApp {
 
 #[derive(Clone, Copy)]
 enum TabAction {
-    AddChart { feed_id: u64, kind: ChartKind },
-    RemoveChart { feed_id: u64, chart_id: u64 },
+    AddChart {
+        feed_id: u64,
+        kind: ChartKind,
+    },
+    RemoveChart {
+        feed_id: u64,
+        chart_id: u64,
+    },
+    SetFootprintTimeframe {
+        feed_id: u64,
+        chart_id: u64,
+        timeframe_ms: u64,
+    },
     LoadMoreHistory,
 }
 
@@ -191,11 +202,11 @@ impl ChartApp {
             symbol,
             timeframe,
         };
-        let chart_layout = ChartKind::ALL
+        let chart_layout = ChartKind::DEFAULT
             .into_iter()
-            .map(|kind| self.new_chart(kind))
+            .map(|kind| self.new_chart(kind, &key.timeframe))
             .collect::<Vec<_>>();
-        let requests = Self::chart_requests(&chart_layout, DEFAULT_HISTORY_LIMIT);
+        let requests = Self::chart_requests(&chart_layout, DEFAULT_HISTORY_LIMIT, &key.timeframe);
         let requested_history = requests
             .iter()
             .map(|request| request.history_limit)
@@ -220,6 +231,8 @@ impl ChartApp {
 
         spawn_indicator_worker(IndicatorWorkerConfig {
             feed_id,
+            source: key.source.clone(),
+            symbol: key.symbol.clone(),
             timeframe: key.timeframe.clone(),
             snapshot_rx: snapshot_rx.clone(),
             chart_plan_rx: indicator_plan_rx,
@@ -262,32 +275,31 @@ impl ChartApp {
         self.activate_tab(self.tabs.len() - 1);
     }
 
-    fn new_chart(&mut self, kind: ChartKind) -> Chart {
+    fn new_chart(&mut self, kind: ChartKind, source_timeframe: &str) -> Chart {
         let id = self.next_chart_id;
         self.next_chart_id += 1;
-        Chart::new(id, kind)
+        Chart::new_for_source(id, kind, source_timeframe)
     }
 
-    fn chart_requests(chart_layout: &ChartLayout, history_limit: u64) -> Vec<ChartDataRequest> {
+    fn chart_requests(
+        chart_layout: &ChartLayout,
+        history_limit: u64,
+        source_timeframe: &str,
+    ) -> Vec<ChartDataRequest> {
         chart_layout
             .iter()
-            .map(|chart| chart.data_request(history_limit))
+            .map(|chart| chart.data_request(history_limit, source_timeframe))
             .collect()
     }
 
-    fn indicator_plan(chart_layout: &ChartLayout) -> Arc<[ChartKind]> {
-        let mut kinds = Vec::new();
-        for chart in chart_layout {
-            if !kinds.contains(&chart.kind) {
-                kinds.push(chart.kind);
-            }
-        }
-        kinds.into()
+    fn indicator_plan(chart_layout: &ChartLayout) -> Arc<[Chart]> {
+        chart_layout.clone().into()
     }
 
     fn update_chart_requests(&self, feed_id: u64) {
         if let Some(tab) = self.tabs.iter().find(|tab| tab.feed_id == feed_id) {
-            let requests = Self::chart_requests(&tab.charts, tab.requested_history);
+            let requests =
+                Self::chart_requests(&tab.charts, tab.requested_history, &tab.key.timeframe);
             tab.indicator_plan_tx
                 .send_replace(Self::indicator_plan(&tab.charts));
             let _ = tab.indicator_signal_tx.try_send(());
@@ -338,7 +350,8 @@ impl ChartApp {
         let Some(tab_index) = self.tabs.iter().position(|tab| tab.feed_id == feed_id) else {
             return;
         };
-        let chart = self.new_chart(kind);
+        let source_timeframe = self.tabs[tab_index].key.timeframe.clone();
+        let chart = self.new_chart(kind, &source_timeframe);
         let feed = {
             let tab = &mut self.tabs[tab_index];
             add_chart_to_layout(&mut tab.charts, chart);
@@ -381,6 +394,35 @@ impl ChartApp {
         self.logger.info(
             Some(feed),
             "Chart cerrado en esta pestaña; cálculo actualizado",
+        );
+    }
+
+    fn set_footprint_timeframe(&mut self, feed_id: u64, chart_id: u64, timeframe_ms: u64) {
+        let Some((feed, label)) = self.tabs.iter_mut().find_map(|tab| {
+            if tab.feed_id != feed_id
+                || !charts::footprint::is_valid_timeframe(&tab.key.timeframe, timeframe_ms)
+            {
+                return None;
+            }
+            let chart = tab
+                .charts
+                .iter_mut()
+                .find(|chart| chart.id == chart_id && chart.kind == ChartKind::Footprint)?;
+            if chart.footprint_timeframe_ms == timeframe_ms {
+                return None;
+            }
+            chart.footprint_timeframe_ms = timeframe_ms;
+            Some((
+                feed_label(&tab.key),
+                charts::footprint::timeframe_label(timeframe_ms),
+            ))
+        }) else {
+            return;
+        };
+        self.update_chart_requests(feed_id);
+        self.logger.info(
+            Some(feed),
+            format!("Timeframe del Chart Footprint cambiado a {label}"),
         );
     }
 
@@ -631,7 +673,8 @@ impl eframe::App for ChartApp {
             for (index, chart) in tab.charts.iter().copied().enumerate() {
                 let (default_pos, default_size, min_size) =
                     chart_window_geometry(chart_area, index, chart_count);
-                if charts::show_window(
+                let mut footprint_timeframe_change = None;
+                let closed = charts::show_window(
                     ui.ctx(),
                     chart,
                     tab.feed_id,
@@ -646,7 +689,16 @@ impl eframe::App for ChartApp {
                     default_size,
                     min_size,
                     chart_count > 1,
-                ) {
+                    &mut footprint_timeframe_change,
+                );
+                if let Some(timeframe_ms) = footprint_timeframe_change {
+                    action = Some(TabAction::SetFootprintTimeframe {
+                        feed_id: tab.feed_id,
+                        chart_id: chart.id,
+                        timeframe_ms,
+                    });
+                }
+                if closed {
                     action = Some(TabAction::RemoveChart {
                         feed_id: tab.feed_id,
                         chart_id: chart.id,
@@ -662,6 +714,11 @@ impl eframe::App for ChartApp {
             Some(TabAction::RemoveChart { feed_id, chart_id }) => {
                 self.remove_chart(feed_id, chart_id)
             }
+            Some(TabAction::SetFootprintTimeframe {
+                feed_id,
+                chart_id,
+                timeframe_ms,
+            }) => self.set_footprint_timeframe(feed_id, chart_id, timeframe_ms),
             Some(TabAction::LoadMoreHistory) => self.load_more_history(),
             None => {}
         }
