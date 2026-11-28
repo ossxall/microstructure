@@ -14,7 +14,7 @@ use super::{FootprintCandle, FootprintLevel, timeframe_label, timeframe_options}
 const GOLD: Color32 = Color32::from_rgb(255, 215, 0);
 const CANDLE_BODY_ALPHA: u8 = 96;
 const DEFAULT_LEVEL_GROUP: usize = 4;
-const LEVEL_GROUP_OPTIONS: [usize; 5] = [1, 2, 4, 8, 16];
+const LEVEL_GROUP_OPTIONS: [usize; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
 #[derive(Clone, Copy, Debug)]
 struct DisplayLevel {
@@ -612,8 +612,8 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_display_levels, candle_body_fill_color, candle_color, delta_color, format_price,
-        format_quantity, format_signed_quantity,
+        LEVEL_GROUP_OPTIONS, aggregate_display_levels, candle_body_fill_color, candle_color,
+        delta_color, format_price, format_quantity, format_signed_quantity,
     };
     use crate::charts::footprint::FootprintLevel;
     use crate::theme::{LIME, PROFILE_BEARISH, PROFILE_BULLISH, TEXT};
@@ -628,6 +628,13 @@ mod tests {
         );
         assert_eq!(format_signed_quantity(-125_000_000, 8), "−1.25");
         assert_eq!(format_quantity(100_000_000, 8), "1");
+    }
+
+    #[test]
+    fn level_group_options_include_accumulations_above_sixteen() {
+        assert!(LEVEL_GROUP_OPTIONS.contains(&32));
+        assert!(LEVEL_GROUP_OPTIONS.contains(&64));
+        assert!(LEVEL_GROUP_OPTIONS.contains(&128));
     }
 
     #[test]
